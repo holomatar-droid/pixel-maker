@@ -547,8 +547,10 @@ main,
 }
 
 .palette-row > span { display: block; margin-bottom: 7px; font-size: 12px; font-weight: 800; }
-.palette-row-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 7px; }
-.palette-row-footer small { min-width: 0; color: var(--hm-copy-muted); font-size: 11px; }
+.palette-row-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 7px; }
+/* ボタンが2つ並ぶと狭い画面で説明文が潰れて読めなくなるため、
+   説明文には下限幅を与え、入らない時は行を折り返してボタンを下に落とす */
+.palette-row-footer small { flex: 1 1 8em; min-width: 8em; color: var(--hm-copy-muted); font-size: 11px; }
 .palette-copy-button { min-height: 44px; flex: 0 0 auto; padding: 0 10px; border: 1px solid var(--hm-line); border-radius: 8px; color: var(--hm-blue); background: #fff; font-size: 11px; font-weight: 900; cursor: pointer; }
 .palette-copy-button:hover { border-color: var(--hm-blue); }
 .palette-copy-button:disabled { cursor: not-allowed; opacity: .45; }
@@ -1141,12 +1143,4 @@ main,
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .settings-panel.is-waiting { transition: none; }
-}
-
-/* 公開版: holometer のロゴ画像の代わりに文字で表示する */
-.holometer-brand .brand-text {
-  font-weight: 800;
-  font-size: 20px;
-  letter-spacing: 0.04em;
-  color: var(--pm-ink, currentColor);
 }

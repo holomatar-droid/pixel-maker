@@ -119,6 +119,7 @@
   const palettePreview = document.getElementById("palettePreview");
   const paletteStatus = document.getElementById("paletteStatus");
   const paletteCopyButton = document.getElementById("paletteCopyButton");
+  const paletteExportButton = document.getElementById("paletteExportButton");
   const twoToneSettings = document.getElementById("twoToneSettings");
   const customSettings = document.getElementById("customSettings");
   const gameSettings = document.getElementById("gameSettings");
@@ -1572,6 +1573,7 @@
     const safePalette = palette.length ? palette : [[1, 70, 234]];
     currentPaletteHex = safePalette.map(rgbToHex);
     if (paletteCopyButton) paletteCopyButton.disabled = currentPaletteHex.length === 0;
+    if (paletteExportButton) paletteExportButton.disabled = currentPaletteHex.length === 0;
     const sorted = [...safePalette].sort((left, right) => rgbToOklab(left)[0] - rgbToOklab(right)[0]);
     const visible = sorted.length <= 16
       ? sorted
@@ -1626,6 +1628,34 @@
 
   function rgbToHex(rgb) {
     return `#${rgb.map((value) => Math.round(clamp(value)).toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  /* GIMP形式(.gpl)のパレット。Aseprite・Pixelorama など主要なドット絵エディタが
+     そのまま読み込めるので、ここで作った配色を持ち出して続きが描ける。
+     ファイル形式に合わせるだけで、各エディタのコードは使っていない。 */
+  function paletteGplText(colors) {
+    const lines = ["GIMP Palette", "Name: holometer pixel-maker", "Columns: 8", "#"];
+    for (const hex of colors) {
+      const value = parseInt(hex.replace("#", ""), 16);
+      const red = (value >> 16) & 255;
+      const green = (value >> 8) & 255;
+      const blue = value & 255;
+      const pad = (channel) => String(channel).padStart(3, " ");
+      lines.push(`${pad(red)} ${pad(green)} ${pad(blue)}\t${hex.replace("#", "").toUpperCase()}`);
+    }
+    return `${lines.join("\n")}\n`;
+  }
+
+  function exportPaletteFile() {
+    if (editor.mode === "editing") return;
+    if (!currentPaletteHex.length) {
+      setStatus("画像を選ぶとパレットを保存できます。", true);
+      return;
+    }
+    const text = paletteGplText(currentPaletteHex);
+    downloadBlob(new Blob([text], { type: "text/plain" }), "holometer-pixel-palette.gpl");
+    setStatus(`${currentPaletteHex.length}色のパレットを保存しました（.gpl / Aseprite・Pixeloramaで読み込めます）。`);
+    track("palette_export", { colors: currentPaletteHex.length });
   }
 
   async function copyPaletteCodes() {
@@ -2320,6 +2350,7 @@
       else {
         currentPaletteHex = [];
         if (paletteCopyButton) paletteCopyButton.disabled = true;
+        if (paletteExportButton) paletteExportButton.disabled = true;
         paletteStatus.textContent = "画像を選ぶと色が表示されます";
       }
     }
@@ -2533,6 +2564,7 @@
       palettePreview.style.gridTemplateColumns = editedBackup.paletteColumns;
       currentPaletteHex = editedBackup.paletteHex;
       if (paletteCopyButton) paletteCopyButton.disabled = currentPaletteHex.length === 0;
+      if (paletteExportButton) paletteExportButton.disabled = currentPaletteHex.length === 0;
       paletteStatus.textContent = editedBackup.paletteStatus;
       stageMeta.textContent = editedBackup.stageMeta;
       canvas.setAttribute("aria-label", editedBackup.canvasLabel);
@@ -2689,6 +2721,7 @@
         palettePreview.style.gridTemplateColumns = previous.paletteColumns;
         currentPaletteHex = previous.paletteHex;
         if (paletteCopyButton) paletteCopyButton.disabled = currentPaletteHex.length === 0;
+        if (paletteExportButton) paletteExportButton.disabled = currentPaletteHex.length === 0;
         paletteStatus.textContent = previous.paletteStatus;
         stageMeta.textContent = previous.stageMeta;
         canvas.setAttribute("aria-label", previous.canvasLabel);
@@ -3268,6 +3301,7 @@
   resetButton.addEventListener("click", resetAll);
   saveButton.addEventListener("click", saveImage);
   paletteCopyButton?.addEventListener("click", copyPaletteCodes);
+  paletteExportButton?.addEventListener("click", exportPaletteFile);
   input.addEventListener("change", () => {
     clearBatch();
     loadFile(input.files?.[0]);
