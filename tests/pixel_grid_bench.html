@@ -18,7 +18,7 @@
  <b>このタブを前面にしたままにしてください</b>（背面だと requestAnimationFrame が止まり、変換が進みません）。
 </p>
 <div id="out">準備中…</div>
-<iframe id="app" src="../"></iframe>
+<iframe id="app" src="../pixel-maker/"></iframe>
 <script>
 const params = new URLSearchParams(location.search);
 const SET   = ({real:'pixel_real', verified:'pixel_verified'})[params.get('set')] || 'pixel_fixtures';
@@ -42,7 +42,7 @@ async function run() {
   await new Promise(r => frame.addEventListener('load', r, { once: true }));
   const doc = frame.contentDocument;
   const win = frame.contentWindow;
-  const expected = await (await fetch(`./${SET}/expected.json`)).json();
+  const expected = await (await fetch(`./${SET}/expected.json?t=${Date.now()}`)).json();
 
   const styleButton = doc.querySelector(`[data-style="${STYLE}"]`);
   if (!styleButton) { out.textContent = `スタイルが見つかりません: ${STYLE}`; return; }

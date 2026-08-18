@@ -63,14 +63,31 @@ Current results on the 22 synthetic fixtures:
 | `auto` | 19/22 | 21/22 |
 | `refine` | 5/22 | 19/22 |
 
+On a set of 10 real AI-generated images: 6/10 within ±5%.
+
 **Read this before trusting those numbers.** Synthetic fixtures are drawn
 with a perfect lattice, so they reward exactly the thing the algorithm
 assumes. A change that improves the synthetic score can still make real
 AI-generated images worse — that has happened here more than once. Always
 check a set of real images too.
 
-Known failure: one real test image is detected at exactly 2× the true count
-(104 → 210), a harmonic-selection error.
+### Audit your ground truth before you trust it
+
+The one remaining "2× harmonic error" in this repo turned out to be a wrong
+label. An image annotated as 104 dots (12.06px pitch) actually has a 6px
+pitch — the autocorrelation comb scores 0.023 at 12.06px against 0.209 at
+6.03px, and a magnified crop shows the block edges sitting on the 6px
+lattice. The tool's answer of 210 was right; the label was wrong.
+
+Relabelling it moved real-image accuracy from 5/10 to 6/10 within ±5%
+**without changing a line of the algorithm.** If you build a fixture set for
+this problem, verify the labels the same way — a period estimator that
+disagrees with a label is evidence about the label too, not only about the
+estimator.
+
+Known failures with confirmed labels: two images at a 7.99px true pitch are
+detected near 8.4px (157 dots read as 149 and 148), a systematic ~5%
+undercount.
 
 A second "known failure" listed here previously — coarse grids (~16 dots)
 detected at ~2× — turned out **not** to be a detection error at all. A 1024px
