@@ -1,0 +1,90 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>格子検出ベンチ</title>
+<style>
+ body{font:13px/1.7 -apple-system,"Hiragino Sans",monospace;margin:20px;color:#111}
+ table{border-collapse:collapse;margin-top:10px;font-size:12px}
+ td,th{border:1px solid #ccc;padding:3px 8px;text-align:right}
+ th:first-child,td:first-child{text-align:left}
+ .ok{color:#0a7}.ng{color:#c22;font-weight:bold}
+ #sum{margin-top:14px;font-size:15px;font-weight:bold}
+ iframe{width:1100px;height:760px;border:1px solid #ddd;margin-top:16px}
+ .note{color:#666;font-size:12px}
+</style>
+<h1>格子検出ベンチ</h1>
+<p class="note">
+ 本物の pixel-maker のページを下で動かし、実際に画像を読み込ませて結果を読み取ります。<br>
+ 処理を再現するのではなく本物を通すので、ここの数字は<b>ツールの表示と必ず一致</b>します。<br>
+ <b>このタブを前面にしたままにしてください</b>（背面だと requestAnimationFrame が止まり、変換が進みません）。
+</p>
+<div id="out">準備中…</div>
+<iframe id="app" src="../"></iframe>
+<script>
+const params = new URLSearchParams(location.search);
+const SET   = ({real:'pixel_real', verified:'pixel_verified'})[params.get('set')] || 'pixel_fixtures';
+const STYLE = params.get('style') || 'refine';
+const out = document.getElementById('out');
+
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function untilReady(doc, timeout = 40000) {
+  const limit = Date.now() + timeout;
+  while (Date.now() < limit) {
+    const meta = doc.getElementById('stageMeta');
+    if (meta && /ドット\s*\d+/.test(meta.textContent)) return meta.textContent;
+    await wait(120);
+  }
+  return null;
+}
+
+async function run() {
+  const frame = document.getElementById('app');
+  await new Promise(r => frame.addEventListener('load', r, { once: true }));
+  const doc = frame.contentDocument;
+  const win = frame.contentWindow;
+  const expected = await (await fetch(`./${SET}/expected.json`)).json();
+
+  const styleButton = doc.querySelector(`[data-style="${STYLE}"]`);
+  if (!styleButton) { out.textContent = `スタイルが見つかりません: ${STYLE}`; return; }
+
+  let exact = 0, near = 0, failed = 0;
+  let html = '<table><tr><th>画像</th><th>真値</th><th>検出</th><th>誤差</th><th>ドット幅</th><th>判定</th></tr>';
+  for (const item of expected) {
+    const blob = await (await fetch(`./${SET}/${item.file}`)).blob();
+    const input = doc.getElementById('imageInput');
+    const dt = new win.DataTransfer();
+    dt.items.add(new win.File([blob], item.file, { type: 'image/png' }));
+    doc.getElementById('stageMeta').textContent = '読込中';
+    input.files = dt.files;
+    input.dispatchEvent(new win.Event('change', { bubbles: true }));
+    if (!(await untilReady(doc))) {
+      html += `<tr><td>${item.file}</td><td>${item.dots}</td><td colspan="3">時間切れ</td><td class="ng">失敗</td></tr>`;
+      failed++; continue;
+    }
+    styleButton.click();                       // スタイルを当ててから再変換を待つ
+    await wait(300);
+    const meta = await untilReady(doc);
+    const m = meta.match(/ドット\s*(\d+)\s*×\s*(\d+)/);
+    const got = m ? Math.max(+m[1], +m[2]) : null;
+    const pitch = (doc.getElementById('pixelSize') || {}).value ?? '';
+    if (got === null) { failed++; continue; }
+    const diff = (got - item.dots) / item.dots;
+    let mark, cls;
+    if (got === item.dots) { mark = '一致'; cls = 'ok'; exact++; near++; }
+    else if (Math.abs(diff) <= 0.05) { mark = '±5%以内'; cls = 'ok'; near++; }
+    else { mark = 'ずれ'; cls = 'ng'; }
+    html += `<tr><td>${item.file}</td><td>${item.dots}</td><td>${got}</td>` +
+            `<td>${(diff*100).toFixed(1)}%</td><td>${pitch}px</td><td class="${cls}">${mark}</td></tr>`;
+    out.innerHTML = html + '</table><p class="note">実行中…</p>';
+  }
+  const n = expected.length;
+  html += '</table>';
+  html += `<div id="sum">${SET} / ${STYLE}モード — ` +
+          `完全一致 ${exact}/${n} (${(exact/n*100).toFixed(0)}%) ／ ` +
+          `±5%以内 ${near}/${n} (${(near/n*100).toFixed(0)}%)` +
+          (failed ? ` ／ 失敗 ${failed}` : '') + '</div>';
+  out.innerHTML = html;
+  window.__benchResult = { set: SET, style: STYLE, total: n, exact, within5: near, failed };
+}
+run().catch(e => { out.textContent = 'エラー: ' + e.message; window.__benchResult = { error: e.message }; });
+</script>

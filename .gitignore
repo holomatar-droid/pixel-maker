@@ -1,0 +1,5 @@
+# ベンチ用の画像はスクリプトで生成できるので追跡しない（30MB以上）
+tests/pixel_fixtures/*.png
+tests/pixel_real/
+tests/pixel_verified/
+.DS_Store
