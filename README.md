@@ -60,8 +60,8 @@ Current results on the 22 synthetic fixtures:
 
 | mode | exact | within ±5% |
 |---|---|---|
-| `auto` | 17/22 | 19/22 |
-| `refine` | 4/22 | 18/22 |
+| `auto` | 19/22 | 21/22 |
+| `refine` | 5/22 | 19/22 |
 
 **Read this before trusting those numbers.** Synthetic fixtures are drawn
 with a perfect lattice, so they reward exactly the thing the algorithm
@@ -69,9 +69,15 @@ assumes. A change that improves the synthetic score can still make real
 AI-generated images worse — that has happened here more than once. Always
 check a set of real images too.
 
-Known failures: images whose true grid is very coarse (~16 dots) can be
-detected at roughly 2× the true count, and one real test image is detected
-at exactly 2×. Both are harmonic-selection errors.
+Known failure: one real test image is detected at exactly 2× the true count
+(104 → 210), a harmonic-selection error.
+
+A second "known failure" listed here previously — coarse grids (~16 dots)
+detected at ~2× — turned out **not** to be a detection error at all. A 1024px
+image drawn at 16 dots has 64px cells; the detector found 64px correctly, but
+a 36px cap on dot size re-cut the image into ~30 dots. Raising the cap fixed
+it. Worth remembering: a plausible story about the algorithm is not evidence
+about the algorithm.
 
 ## What we tried and reverted
 
@@ -86,6 +92,17 @@ Kept here so nobody re-runs the same experiment.
   true period and the score drifts toward larger steps. **Adopting the score
   requires adopting their profile construction too.** That is the most
   promising open direction in this repo.
+- **Replacing the profile itself** with |2nd difference| feature maps
+  projected over bands, then running the comb score on that — the fix implied
+  by the entry above. In isolation it is *correct*: on a clean 16-dot fixture
+  it recovers step = 64.00 exactly. But it did not move the tool's overall
+  score, so it is not shipped. Fine grids (~5px cells) score below the
+  confidence threshold and fall back, and on rare firings it made things
+  worse (242 → 272 on our verified image). The open question is why fine
+  grids score so low: at 5px per cell there are only 5 samples per period,
+  so the 2nd-difference impulses of adjacent boundaries blend. Measuring on
+  a non-downscaled (or upscaled) analysis canvas looks like the next thing
+  to try.
 - **Full-interval-centroid peak detection** — synthetic 10→17 within 5%, but
   a verified real image went 251→223.
 - **Harmonic-consistency selection** — synthetic 18→17, one real image

@@ -5,7 +5,10 @@
   const MAX_SOURCE_EDGE = 1920;
   // ドットの大きさの上限。1024px前後のAI画像で 1ドット=32px になる例が多く、
   // 24 のままだと自動検出がそこで頭打ちになり格子を取り違える。
-  const MAX_PIXEL_SIZE = 36;
+  /* 1024pxの絵が16ドットなら1ドット64px。上限36だと自動検出が正しく64を
+     出しても36に丸められ、28〜30ドットの細切れになっていた。
+     粗いドット絵を取りこぼさない値まで上げる */
+  const MAX_PIXEL_SIZE = 72;
   const MAX_EDIT_CELL_SIZE = 64;
   const AUTO_PALETTE_SAMPLE_EDGE = 512;
   const BATCH_MAX_IMAGES = 250;
