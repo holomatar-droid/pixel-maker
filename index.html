@@ -9,7 +9,7 @@
   <link rel="icon" type="image/svg+xml" href="./favicon.svg">
   <link rel="stylesheet" href="./pixel-maker.css?v=20260818-3">
   <script src="./vendor/fflate.js?v=0.8.2" defer></script>
-  <script src="./pixel-maker.js?v=20260819-4" defer></script>
+  <script src="./pixel-maker.js?v=20260819-8" defer></script>
 </head>
 <body>
   <header class="tool-header">
@@ -217,6 +217,15 @@
             <button type="button" data-grid-snap="auto" aria-pressed="true">グリッド検出</button>
           </div>
           <small id="gridSnapStatus">画像を選ぶと元のドット間隔を検出します。検出後もスライダーで調整できます。</small>
+        </fieldset>
+
+        <fieldset class="control-block">
+          <legend>背景</legend>
+          <div class="segment-grid two" role="group" aria-label="背景の扱い">
+            <button type="button" data-bg-remove="keep" aria-pressed="true">残す</button>
+            <button type="button" data-bg-remove="auto" aria-pressed="false">自動で透過</button>
+          </div>
+          <small>ベタ塗りの背景を外周からたどって透明にします。閉じた場所（目の中など）は残ります。</small>
           <button class="palette-copy-button" id="gridSuggestButton" type="button" hidden>検出値で試す</button>
         </fieldset>
 

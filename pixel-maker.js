@@ -217,6 +217,7 @@
   let gridSnap = "off";
   let detectedGridSize = 0;
   let appliedGridSize = 0;
+  let backgroundCut = "keep";
   let gridSizeAdjusted = false;
   /* 確信度の門で捨てた候補を、消さずに覚えておく。写真を壊さないための門なので
      自動では採用しないが、実測では捨てた候補の方が正しいことがある
@@ -709,6 +710,7 @@
       edgeBoost.value,
       customInputs.map((input) => input.value),
       gridSnap,
+      backgroundCut,
       accentKeep,
       skinToneKeep,
       gameHardware,
@@ -811,6 +813,188 @@
   /* 近い色をまとめる。代表色は「その色を実際に使っている画素数」で重み付けした平均にする。
      単純平均にすると、にじみで生まれた少数の中間色が主要色と同じ重みを持ってしまい、
      肌色のような広い面が灰色側へ引っ張られる（彩度が半分近く落ちる）。 */
+  /* にじみ色の抑制。
+
+     白い背景と黒いフチの間には、AIのぼかしが作った中間色が残る。これは
+     「似た色」ではないので mergeSimilarPaletteColors では消えず、パレットの
+     正式な1色として生き残ってしまう（実測: 真値5色の絵で、出力63色のうち
+     35色が真値に無い色。上位は rgb(232,232,231) のような薄いグレー）。
+
+     見分け方は色だけでは足りない。ドット絵には意図した中間色（陰影）も
+     あるからだ。にじみは「2色の間に挟まれ、かつその2色の境界にしか出ない」。
+     そこで、色空間で2色を結ぶ線の上に乗っていることと、画素の大半がその
+     2色に隣接していることの両方を条件にする。
+     考え方は PixelRefiner（MIT）の「縁の汚染色を差し替え」に近い。 */
+  const BLEND_MAX_SHARE = 0.12;      // これより多い色は面として使われている
+  const BLEND_MAX_OFFSET = 0.035;    // 2色を結ぶ線からの距離（OkLab）
+  const BLEND_MIN_ADJACENCY = 0.7;   // 画素のうち、2色に隣接している割合
+
+  /* 背景の自動透過。
+
+     外周の画素から、背景色に近い所だけを塗りつぶしで辿って透明にする。
+     色が近いだけで消すと、目の白や服の白まで抜けてしまうので、
+     「画像の外周から地続きであること」を条件にする。
+
+     透過したあと、境界には白背景と輪郭の中間色が薄く残る。これが
+     「うすい色が出る」の正体なので、透明に隣接していて背景色寄りの画素を
+     もう一度だけ掃除する。 */
+  const BG_MATCH_DISTANCE = 0.10;   // 背景と同じとみなす距離（OkLab）
+  const BG_FRINGE_DISTANCE = 0.22;  // 縁に残った中間色を掃除する距離
+
+  function removeFlatBackground(context, width, height) {
+    if (width < 3 || height < 3) return;
+    const image = context.getImageData(0, 0, width, height);
+    const data = image.data;
+    /* 背景色は四隅の多数決。1隅だけ被写体が寄っていても巻き込まれない */
+    const corners = [0, width - 1, (height - 1) * width, height * width - 1];
+    const tally = new Map();
+    for (const index of corners) {
+      const offset = index * 4;
+      if (data[offset + 3] < 8) continue;
+      const key = `${data[offset]},${data[offset + 1]},${data[offset + 2]}`;
+      tally.set(key, (tally.get(key) || 0) + 1);
+    }
+    if (!tally.size) return;
+    const background = [...tally.entries()].sort((left, right) => right[1] - left[1])[0][0]
+      .split(",").map(Number);
+    const backgroundLab = rgbToOklab(background);
+    const distance = (offset) => {
+      const lab = rgbToOklab([data[offset], data[offset + 1], data[offset + 2]]);
+      const dl = lab[0] - backgroundLab[0];
+      const da = lab[1] - backgroundLab[1];
+      const db = lab[2] - backgroundLab[2];
+      return Math.sqrt(dl * dl + da * da + db * db);
+    };
+
+    const visited = new Uint8Array(width * height);
+    const queue = [];
+    for (let x = 0; x < width; x += 1) {
+      queue.push(x, (height - 1) * width + x);
+    }
+    for (let y = 0; y < height; y += 1) {
+      queue.push(y * width, y * width + width - 1);
+    }
+    let cut = 0;
+    while (queue.length) {
+      const index = queue.pop();
+      if (index < 0 || index >= width * height || visited[index]) continue;
+      visited[index] = 1;
+      const offset = index * 4;
+      if (data[offset + 3] < 8) continue;
+      if (distance(offset) > BG_MATCH_DISTANCE) continue;
+      data[offset + 3] = 0;
+      cut += 1;
+      const x = index % width;
+      const y = (index - x) / width;
+      if (x > 0) queue.push(index - 1);
+      if (x < width - 1) queue.push(index + 1);
+      if (y > 0) queue.push(index - width);
+      if (y < height - 1) queue.push(index + width);
+    }
+    if (!cut) return;
+
+    /* 縁に残った中間色の掃除。1周だけ行い、削りすぎないようにする */
+    const fringe = [];
+    for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const offset = index * 4;
+      if (data[offset + 3] < 8) continue;
+      let touchesHole = false;
+      for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        if (data[(ny * width + nx) * 4 + 3] < 8) { touchesHole = true; break; }
+      }
+      if (touchesHole && distance(offset) < BG_FRINGE_DISTANCE) fringe.push(index);
+    }
+    for (const index of fringe) data[index * 4 + 3] = 0;
+    context.putImageData(image, 0, 0);
+  }
+
+  function suppressBlendColors(data, width, height) {
+    const counts = new Map();
+    for (let index = 0; index < width * height; index += 1) {
+      const offset = index * 4;
+      if (data[offset + 3] < 8) continue;
+      const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    if (counts.size < 3) return;
+    let total = 0;
+    for (const value of counts.values()) total += value;
+    const entries = [...counts.entries()]
+      .map(([key, count]) => ({
+        key,
+        count,
+        rgb: [(key >> 16) & 255, (key >> 8) & 255, key & 255]
+      }))
+      .sort((left, right) => right.count - left.count);
+    for (const entry of entries) entry.lab = rgbToOklab(entry.rgb);
+
+    const remap = new Map();
+    for (const candidate of entries) {
+      if (candidate.count / total > BLEND_MAX_SHARE) continue;
+      let best = null;
+      for (const first of entries) {
+        if (first.key === candidate.key || first.count <= candidate.count) continue;
+        for (const second of entries) {
+          if (second.key === candidate.key || second.key === first.key) continue;
+          if (second.count <= candidate.count) continue;
+          const ax = second.lab[0] - first.lab[0];
+          const ay = second.lab[1] - first.lab[1];
+          const az = second.lab[2] - first.lab[2];
+          const lengthSquared = ax * ax + ay * ay + az * az;
+          if (lengthSquared <= 1e-9) continue;
+          const bx = candidate.lab[0] - first.lab[0];
+          const by = candidate.lab[1] - first.lab[1];
+          const bz = candidate.lab[2] - first.lab[2];
+          const position = (bx * ax + by * ay + bz * az) / lengthSquared;
+          /* 端の近くは「にじみ」ではなく単に似た色。中ほどだけを対象にする */
+          if (position < 0.2 || position > 0.8) continue;
+          const dx = bx - ax * position;
+          const dy = by - ay * position;
+          const dz = bz - az * position;
+          const offset = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (offset > BLEND_MAX_OFFSET) continue;
+          if (!best || offset < best.offset) best = { offset, first, second, position };
+        }
+      }
+      if (!best) continue;
+      /* 空間的な裏取り: にじみなら、その画素は2色の境目にしか無いはず */
+      let touching = 0;
+      let seen = 0;
+      for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * 4;
+        if (data[offset + 3] < 8) continue;
+        const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
+        if (key !== candidate.key) continue;
+        seen += 1;
+        let neighbour = false;
+        for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          const near = (ny * width + nx) * 4;
+          if (data[near + 3] < 8) continue;
+          const nearKey = (data[near] << 16) | (data[near + 1] << 8) | data[near + 2];
+          if (nearKey === best.first.key || nearKey === best.second.key) { neighbour = true; break; }
+        }
+        if (neighbour) touching += 1;
+      }
+      if (!seen || touching / seen < BLEND_MIN_ADJACENCY) continue;
+      remap.set(candidate.key, best.position < 0.5 ? best.first.rgb : best.second.rgb);
+    }
+    if (!remap.size) return;
+    for (let index = 0; index < width * height; index += 1) {
+      const offset = index * 4;
+      if (data[offset + 3] < 8) continue;
+      const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
+      const replacement = remap.get(key);
+      if (!replacement) continue;
+      data[offset] = replacement[0];
+      data[offset + 1] = replacement[1];
+      data[offset + 2] = replacement[2];
+    }
+  }
+
   function mergeSimilarPaletteColors(palette, weights) {
     if (flatFill === "off" || palette.length < 2) return palette;
     const threshold = flatFill === "strong" ? 0.066 : 0.036;
@@ -1445,6 +1629,9 @@
       output.data[target + 2] = Math.round(entry.rgba[2] / divisor);
       output.data[target + 3] = Math.round(entry.rgba[3] / divisor);
     }
+    /* refine/craft の色はここで決まり、後段のパレット処理を通らない。
+       白背景と黒フチの中間色を落とすのはこの位置。 */
+    if (flatFill !== "off") suppressBlendColors(output.data, snapped.width, snapped.height);
     snappedContext.putImageData(output, 0, 0);
     gridFallbackReason = "";
     return { canvas: snapped, block: step / analysisScale * outputScale, detectedBlock, sourceWidth, sourceHeight };
@@ -1793,6 +1980,9 @@
         }
       }
     }
+
+    /* ディザは意図的に色を散らすので、その場合は触らない */
+    if (!diffusionStrength && flatFill !== "off") suppressBlendColors(data, width, height);
 
     if (outline !== "off") {
       const edgeMap = new Uint8Array(width * height);
@@ -2678,6 +2868,9 @@
     document.querySelectorAll("[data-grid-snap]").forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.gridSnap === gridSnap));
     });
+    document.querySelectorAll("[data-bg-remove]").forEach((button) => {
+      button.setAttribute("aria-pressed", String(button.dataset.bgRemove === backgroundCut));
+    });
     document.querySelectorAll("[data-outline]").forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.outline === outline));
     });
@@ -2856,6 +3049,8 @@
       smallContext.putImageData(pixels, 0, 0);
       if (activeStyle === "craft") palette = paletteFromContext(smallContext, width, height, 64);
     }
+
+    if (backgroundCut === "auto") removeFlatBackground(smallContext, width, height);
 
     const upscaled = snapped && outputDots === 0;
     canvas.width = upscaled ? sourceWidth : Math.max(1, Math.round(width * appliedBlock));
@@ -3780,6 +3975,13 @@
   });
   document.querySelectorAll("[data-grid-snap]").forEach((button) => {
     button.addEventListener("click", () => setGridSnap(button.dataset.gridSnap));
+  });
+  document.querySelectorAll("[data-bg-remove]").forEach((button) => {
+    button.addEventListener("click", () => {
+      backgroundCut = button.dataset.bgRemove;
+      updateControlState();
+      scheduleRender(backgroundCut === "auto" ? "背景を透過しました。" : "背景を残しました。");
+    });
   });
   document.querySelectorAll("[data-outline]").forEach((button) => {
     button.addEventListener("click", () => setOutline(button.dataset.outline));
