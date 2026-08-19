@@ -840,6 +840,64 @@
      102×100ドットでも600ms近くかかっていた。端点は上位色だけに絞る。 */
   const BLEND_MAX_ENDPOINTS = 12;
 
+  /* セル多数決で決めた色を、知覚的にほぼ同じもの同士でまとめる。
+
+     格子経路（AI補正・手打ち風）は processPixels を通らないため、
+     パレット統合が一度も走っていなかった。実測では、ベタ塗りのはずの面に
+     OkLab距離 0.009 の2色が並存していた（統合の閾値は 0.036〜0.066 なので、
+     本来なら1色になるべき差）。「ベタ塗りのむらをなくす」を切り替えても
+     結果が変わらなかったのはこのため。
+
+     面積の大きい色を代表に選び、そこへ寄せる。少数派を残すと、
+     広いベタ面が少数派の色に塗り替わってしまう。 */
+  function mergeSnappedCellColors(data, width, height) {
+    if (flatFill === "off") return;
+    const threshold = flatFill === "strong" ? 0.066 : 0.036;
+    const counts = new Map();
+    for (let index = 0; index < width * height; index += 1) {
+      const offset = index * 4;
+      if (data[offset + 3] < 8) continue;
+      const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    if (counts.size < 2) return;
+    const entries = [...counts.entries()]
+      .map(([key, count]) => ({
+        key,
+        count,
+        rgb: [(key >> 16) & 255, (key >> 8) & 255, key & 255]
+      }))
+      .sort((left, right) => right.count - left.count);
+    for (const entry of entries) entry.lab = rgbToOklab(entry.rgb);
+
+    const remap = new Map();
+    const kept = [];
+    for (const entry of entries) {
+      let nearest = null;
+      let nearestDistance = Infinity;
+      for (const target of kept) {
+        const dl = (entry.lab[0] - target.lab[0]) * 1.2;
+        const da = entry.lab[1] - target.lab[1];
+        const db = entry.lab[2] - target.lab[2];
+        const distance = Math.sqrt(dl * dl + da * da + db * db);
+        if (distance < nearestDistance) { nearestDistance = distance; nearest = target; }
+      }
+      if (nearest && nearestDistance <= threshold) remap.set(entry.key, nearest.rgb);
+      else kept.push(entry);
+    }
+    if (!remap.size) return;
+    for (let index = 0; index < width * height; index += 1) {
+      const offset = index * 4;
+      if (data[offset + 3] < 8) continue;
+      const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
+      const replacement = remap.get(key);
+      if (!replacement) continue;
+      data[offset] = replacement[0];
+      data[offset + 1] = replacement[1];
+      data[offset + 2] = replacement[2];
+    }
+  }
+
   function suppressBlendColors(data, width, height) {
     const total = width * height;
     /* 色ごとに画像全体を走査すると、ドット数が増えたときに重くなる。
@@ -3127,11 +3185,10 @@
     if (usesStructuredGrid() && snapped) {
       // Pixel Snapper と同じく、セル多数決で選んだ量子化色をそのまま使う。
       // ここで元画像パレットへ再変換すると、ベタ面に別の色が戻ってしまう。
-      if (activeStyle === "craft") {
-        const pixels = smallContext.getImageData(0, 0, width, height);
-        tidyPixelClusters(pixels.data, width, height);
-        smallContext.putImageData(pixels, 0, 0);
-      }
+      const pixels = smallContext.getImageData(0, 0, width, height);
+      mergeSnappedCellColors(pixels.data, width, height);
+      if (activeStyle === "craft") tidyPixelClusters(pixels.data, width, height);
+      smallContext.putImageData(pixels, 0, 0);
       palette = paletteFromContext(smallContext, width, height, 64);
     } else {
       const pixels = smallContext.getImageData(0, 0, width, height);
