@@ -825,21 +825,99 @@
      そこで、色空間で2色を結ぶ線の上に乗っていることと、画素の大半がその
      2色に隣接していることの両方を条件にする。
      考え方は PixelRefiner（MIT）の「縁の汚染色を差し替え」に近い。 */
-  const BLEND_MAX_SHARE = 0.12;      // これより多い色は面として使われている
+  const BLEND_MAX_SHARE = 0.06;      // これより多い色は面として使われている
   const BLEND_MAX_OFFSET = 0.035;    // 2色を結ぶ線からの距離（OkLab）
-  const BLEND_MIN_ADJACENCY = 0.7;   // 画素のうち、2色に隣接している割合
+  const BLEND_MIN_ADJACENCY = 0.85;  // 画素のうち、その2色に隣接している割合
+  const BLEND_MIN_POSITION = 0.08;   // 端に寄ったにじみも拾う（実測 #d9d9d9 は白寄り87%）
+  const BLEND_MAX_COLORS = 96;       // 走査対象の色数上限（重くしないため）
 
-  /* 背景の自動透過。
+  function suppressBlendColors(data, width, height) {
+    const total = width * height;
+    /* 色ごとに画像全体を走査すると、ドット数が増えたときに重くなる。
+       先に色→画素番号の一覧を作り、判定は自分の画素だけ見る。 */
+    const buckets = new Map();
+    for (let index = 0; index < total; index += 1) {
+      const offset = index * 4;
+      if (data[offset + 3] < 8) continue;
+      const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
+      let bucket = buckets.get(key);
+      if (!bucket) { bucket = []; buckets.set(key, bucket); }
+      bucket.push(index);
+    }
+    if (buckets.size < 3) return;
+    let opaque = 0;
+    for (const bucket of buckets.values()) opaque += bucket.length;
+    const entries = [...buckets.entries()]
+      .map(([key, bucket]) => ({
+        key,
+        bucket,
+        count: bucket.length,
+        rgb: [(key >> 16) & 255, (key >> 8) & 255, key & 255]
+      }))
+      .sort((left, right) => right.count - left.count)
+      .slice(0, BLEND_MAX_COLORS);
+    for (const entry of entries) entry.lab = rgbToOklab(entry.rgb);
 
-     外周の画素から、背景色に近い所だけを塗りつぶしで辿って透明にする。
-     色が近いだけで消すと、目の白や服の白まで抜けてしまうので、
-     「画像の外周から地続きであること」を条件にする。
+    const remap = new Map();
+    for (const candidate of entries) {
+      if (candidate.count / opaque > BLEND_MAX_SHARE) continue;
+      let best = null;
+      for (const first of entries) {
+        if (first.key === candidate.key || first.count <= candidate.count) continue;
+        for (const second of entries) {
+          if (second.key === candidate.key || second.key === first.key) continue;
+          if (second.count <= candidate.count) continue;
+          const ax = second.lab[0] - first.lab[0];
+          const ay = second.lab[1] - first.lab[1];
+          const az = second.lab[2] - first.lab[2];
+          const lengthSquared = ax * ax + ay * ay + az * az;
+          if (lengthSquared <= 1e-9) continue;
+          const bx = candidate.lab[0] - first.lab[0];
+          const by = candidate.lab[1] - first.lab[1];
+          const bz = candidate.lab[2] - first.lab[2];
+          const position = (bx * ax + by * ay + bz * az) / lengthSquared;
+          if (position < BLEND_MIN_POSITION || position > 1 - BLEND_MIN_POSITION) continue;
+          const dx = bx - ax * position;
+          const dy = by - ay * position;
+          const dz = bz - az * position;
+          const gap = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (gap > BLEND_MAX_OFFSET) continue;
+          if (!best || gap < best.gap) best = { gap, first, second, position };
+        }
+      }
+      if (!best) continue;
+      /* 空間的な裏取り: にじみなら、その画素は必ず2色の境目にある */
+      let touching = 0;
+      for (const index of candidate.bucket) {
+        const x = index % width;
+        const y = (index - x) / width;
+        let neighbour = false;
+        if (x > 0) neighbour = neighbour || matchesPair(data, index - 1, best);
+        if (!neighbour && x < width - 1) neighbour = matchesPair(data, index + 1, best);
+        if (!neighbour && y > 0) neighbour = matchesPair(data, index - width, best);
+        if (!neighbour && y < height - 1) neighbour = matchesPair(data, index + width, best);
+        if (neighbour) touching += 1;
+      }
+      if (touching / candidate.count < BLEND_MIN_ADJACENCY) continue;
+      remap.set(candidate.key, best.position < 0.5 ? best.first.rgb : best.second.rgb);
+    }
+    if (!remap.size) return;
+    for (const [key, replacement] of remap) {
+      for (const index of buckets.get(key)) {
+        const offset = index * 4;
+        data[offset] = replacement[0];
+        data[offset + 1] = replacement[1];
+        data[offset + 2] = replacement[2];
+      }
+    }
+  }
 
-     透過したあと、境界には白背景と輪郭の中間色が薄く残る。これが
-     「うすい色が出る」の正体なので、透明に隣接していて背景色寄りの画素を
-     もう一度だけ掃除する。 */
-  const BG_MATCH_DISTANCE = 0.10;   // 背景と同じとみなす距離（OkLab）
-  const BG_FRINGE_DISTANCE = 0.22;  // 縁に残った中間色を掃除する距離
+  function matchesPair(data, index, best) {
+    const offset = index * 4;
+    if (data[offset + 3] < 8) return false;
+    const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
+    return key === best.first.key || key === best.second.key;
+  }
 
   function removeFlatBackground(context, width, height) {
     if (width < 3 || height < 3) return;
@@ -1631,7 +1709,7 @@
     }
     /* refine/craft の色はここで決まり、後段のパレット処理を通らない。
        白背景と黒フチの中間色を落とすのはこの位置。 */
-    if (flatFill !== "off") suppressBlendColors(output.data, snapped.width, snapped.height);
+    suppressBlendColors(output.data, snapped.width, snapped.height);
     snappedContext.putImageData(output, 0, 0);
     gridFallbackReason = "";
     return { canvas: snapped, block: step / analysisScale * outputScale, detectedBlock, sourceWidth, sourceHeight };
