@@ -3,59 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ドット絵変換ツール | AI画像・写真をピクセルアートに変換 | Holometer</title>
+  <title>ピクセルアートコンバーター | AI画像・写真をドット絵に変換</title>
   <meta name="description" content="写真・イラスト・AI生成のピクセルアート風画像を、グリッドと色数を整理したドット絵へ変換。1ドットずつ手直しでき、ZIP内の画像も同じ設定で一括変換できます。">
-  <link rel="canonical" href="https://holometer.net/pixel-maker/">
   <meta name="theme-color" content="#0146ea">
   <link rel="icon" type="image/svg+xml" href="./favicon.svg">
-  <link rel="stylesheet" href="./pixel-maker.css?v=20260818-2">
+  <link rel="stylesheet" href="./pixel-maker.css?v=20260818-3">
   <script src="./vendor/fflate.js?v=0.8.2" defer></script>
-  <script src="./pixel-maker.js?v=20260818-5" defer></script>
-  <script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    "@graph": [
-      {
-        "@type": "WebApplication",
-        "name": "Holometer ドット絵変換ツール",
-        "url": "https://holometer.net/pixel-maker/",
-        "description": "写真・イラスト・AI生成のピクセルアート風画像を、グリッドと色数を整理したドット絵へ変換し、1ドットずつ手直しできる無料Webツール。",
-        "applicationCategory": "MultimediaApplication",
-        "operatingSystem": "Web browser",
-        "isAccessibleForFree": true,
-        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "JPY" },
-        "publisher": { "@type": "Organization", "name": "holometer", "url": "https://holometer.net/" }
-      },
-      {
-        "@type": "HowTo",
-        "name": "画像をドット絵にする方法",
-        "step": [
-          { "@type": "HowToStep", "position": 1, "name": "画像を選ぶ", "text": "JPG、PNG、WebPなどの画像を1枚選びます。" },
-          { "@type": "HowToStep", "position": 2, "name": "仕上がりを選ぶ", "text": "ドットの大きさが不揃いな画像ではピクセルアートを選ぶと、元画像の間隔を検出して一定のグリッドへ変換します。写真の色、2色、携帯ゲーム風なども選べます。" },
-          { "@type": "HowToStep", "position": 3, "name": "手直しして保存する", "text": "必要ならドットを手直しして、PNGで保存します。" }
-        ]
-      }
-    ]
-  }
-  </script>
+  <script src="./pixel-maker.js?v=20260819-2" defer></script>
 </head>
 <body>
   <header class="tool-header">
     <a class="holometer-brand" href="https://holometer.net/" aria-label="Holometer トップへ">
       <span class="brand-text">pixel maker</span>
     </a>
-    <nav aria-label="関連ツール">
-      <a aria-current="page" href="./">ドット絵</a>
-      <a href="../blue_tools/">投稿画像</a>
-      <a href="../oshi_tools/">推し活ツール</a>
-    </nav>
   </header>
 
   <main id="top">
     <section class="tool-intro" aria-labelledby="page-title">
-      <p class="tool-eyebrow">HOLOMETER TOOLS</p>
-      <h1 id="page-title">ドット絵変換ツール</h1>
-      <p>写真やイラストはもちろん、AI生成の「ドット絵風」画像も、グリッドと色数を整理して保存できます。</p>
+      <p class="tool-eyebrow">PIXEL ART CONVERTER</p>
+      <h1 id="page-title"><span>ピクセルアート</span><span>コンバーター</span></h1>
+      <p>写真やイラスト、AI生成画像をドット絵に変換。グリッドと色数を整理して保存できます。</p>
     </section>
 
     <div class="maker-layout">
@@ -88,7 +55,16 @@
         <div class="main-actions">
           <button class="secondary-button" id="changeImageButton" type="button">画像を選ぶ</button>
           <button class="secondary-button" id="editToggleButton" type="button" hidden>ドットを手直し</button>
-          <button class="primary-button" id="saveButton" type="button" disabled>PNGで保存</button>
+          <div class="save-control">
+            <label for="exportScale">保存サイズ
+              <select id="exportScale">
+                <option value="1">等倍</option>
+                <option value="2">2倍</option>
+                <option value="3">3倍</option>
+              </select>
+            </label>
+            <button class="primary-button" id="saveButton" type="button" disabled>PNGで保存</button>
+          </div>
         </div>
         <p class="status-message" id="statusMessage" aria-live="polite"></p>
         <p class="privacy-note"><strong>選んだ画像そのものは送信しません。</strong>変換はこの端末のブラウザ内で行います。</p>
@@ -264,7 +240,8 @@
           <div class="palette-row-footer">
             <small id="paletteStatus">4色の固定配色です</small>
             <button class="palette-copy-button" id="paletteCopyButton" type="button">色コードをコピー</button>
-            <button class="palette-copy-button" id="paletteExportButton" type="button">パレットを保存</button>
+            <button class="palette-copy-button" id="paletteExportButton" type="button">.GPLを書き出し</button>
+            <button class="palette-copy-button" id="palettePngButton" type="button">.PNGを書き出し</button>
           </div>
         </div>
 
@@ -275,6 +252,15 @@
             <button type="button" data-accent-keep="on" aria-pressed="true">残す</button>
           </div>
           <small>目、ハイライト、細いラインなど、面積の小さい色を優先して残します。色ノイズが増える時は「なし」。</small>
+        </fieldset>
+
+        <fieldset class="simple-fieldset">
+          <legend>色の優先</legend>
+          <div class="segment-grid two" role="group" aria-label="肌に近い色を優先する">
+            <button type="button" data-skin-tone="off" aria-pressed="true">バランス</button>
+            <button type="button" data-skin-tone="on" aria-pressed="false">肌色を優先</button>
+          </div>
+          <small>人物イラスト向け。肌に近い暖色を1色残しやすくします。ベージュやオレンジも選ばれることがあります。</small>
         </fieldset>
 
         <fieldset class="simple-fieldset">
@@ -434,20 +420,14 @@
       <p class="setting-note">格子検出から減色へ進む処理順は、Hugo Duprez氏の<a href="https://www.spritefusion.com/pixel-snapper" rel="noopener noreferrer">Sprite Fusion Pixel Snapper</a>を参考にしています。面積の小さい差し色を残す操作思想は、<a href="https://www.raky.net/color-quantizer/" rel="noopener noreferrer">Raky 画像減色ツール</a>も参考にしました。UIと変換処理はHolometer向けに独自実装しています。</p>
     </section>
 
-    <nav class="related-links" aria-label="ほかのHolometerツール">
-      <a href="../blue_tools/"><span>文章からX投稿画像を作る</span><b aria-hidden="true">→</b></a>
-      <a href="../oshi_tools/"><span>推し活ツールを見る</span><b aria-hidden="true">→</b></a>
-    </nav>
   </main>
 
 
   <footer class="tool-footer">
-    <p>ドット絵変換ツール <span>by Holometer</span></p>
+    <p>Pixel Art Converter <span>by Holometer</span></p>
     <nav aria-label="関連ページ">
-      <a href="../blue_tools/">投稿画像</a>
-      <a href="../oshi_tools/">推し活ツール</a>
-      <a href="https://holometer.net/">Holometer</a>
-      <a href="https://holometer.net/privacy.php">プライバシー</a>
+      <a href="https://holometer.net/pixel-maker/">動いているもの</a>
+      <a href="https://github.com/holomatar-droid/pixel-maker">ソース</a>
     </nav>
     <p class="disclaimer">本ツールは任天堂株式会社とは関係のない非公式ツールです。記載された製品名は各権利者の商標または商品名です。自分で撮った画像や、使用許可のある画像をお使いください。</p>
   </footer>

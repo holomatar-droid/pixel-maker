@@ -15,6 +15,7 @@
   const BATCH_MAX_ZIP_BYTES = 150 * 1024 * 1024;
   const BATCH_MAX_EXTRACTED_BYTES = 600 * 1024 * 1024;
   const BATCH_MAX_IMAGE_PIXELS = 64_000_000;
+  const MAX_EXPORT_PIXELS = 64_000_000;
   const BATCH_IMAGE_EXTENSIONS = /\.(png|jpe?g|webp|gif|bmp)$/i;
   const SPRITE_MAX_FRAMES = 64;
   const SPRITE_MAX_PIXELS = 64_000_000;
@@ -68,7 +69,7 @@
     // 通常変換と写真は既存の色づくりを保ち、補正モードの変更を波及させない。
     refine: { pixel: 8, colors: 64, dither: "off", gridSnap: "auto", gridStabilize: true, accentKeep: false, flatFill: "off", saturation: 0, contrast: 0, edge: 0, outline: "off" },
     craft: { pixel: 8, colors: 16, dither: "off", gridSnap: "auto", gridStabilize: true, accentKeep: true, flatFill: "soft", saturation: 0, contrast: 0, edge: 0, outline: "off" },
-    auto: { pixel: 8, colors: 32, dither: "off", gridSnap: "auto", accentKeep: false, flatFill: "soft", saturation: 0, contrast: 0, edge: 12, outline: "off" },
+    auto: { pixel: 8, colors: 32, dither: "off", gridSnap: "auto", accentKeep: false, flatFill: "soft", saturation: 0, contrast: 0, edge: 0, outline: "off" },
     photo: { pixel: 4, colors: 128, dither: "off", gridSnap: "off", accentKeep: true, flatFill: "off", saturation: 0, contrast: 0, edge: 0, outline: "off" },
     "two-tone": { pixel: 8, dither: "off", gridSnap: "off", accentKeep: false, flatFill: "off", saturation: 0, contrast: 4, edge: 8, outline: "off", threshold: 58 },
     /* ゲーム機風は「元がドット絵風の画像を実機の色に落とす」用途が主なので、格子検出を既定にする。
@@ -108,6 +109,7 @@
   const changeImageButton = document.getElementById("changeImageButton");
   const resetButton = document.getElementById("resetButton");
   const saveButton = document.getElementById("saveButton");
+  const exportScale = document.getElementById("exportScale");
   const statusMessage = document.getElementById("statusMessage");
   const stageMeta = document.getElementById("stageMeta");
   const styleHelp = document.getElementById("styleHelp");
@@ -120,6 +122,7 @@
   const paletteStatus = document.getElementById("paletteStatus");
   const paletteCopyButton = document.getElementById("paletteCopyButton");
   const paletteExportButton = document.getElementById("paletteExportButton");
+  const palettePngButton = document.getElementById("palettePngButton");
   const twoToneSettings = document.getElementById("twoToneSettings");
   const customSettings = document.getElementById("customSettings");
   const gameSettings = document.getElementById("gameSettings");
@@ -214,7 +217,9 @@
   let detectedGridSize = 0;
   let appliedGridSize = 0;
   let gridSizeAdjusted = false;
+  let gridFallbackReason = "";
   let accentKeep = false;
+  let skinToneKeep = false;
   let flatFill = "off";
   let outline = "off";
   let gameHardware = "gb";
@@ -347,7 +352,10 @@
   function adjustSaturation(rgb, amount) {
     if (amount <= 0) return rgb;
     const lab = rgbToOklab(rgb);
-    const factor = 1 + amount * 1.25;
+    const chroma = Math.hypot(lab[1], lab[2]);
+    const position = clamp01((chroma - 0.03) / 0.05);
+    const vividness = position * position * (3 - 2 * position);
+    const factor = 1 + amount * 1.25 * vividness;
     lab[1] *= factor;
     lab[2] *= factor;
     return oklabToRgb(lab);
@@ -422,6 +430,71 @@
     });
   }
 
+  function skinToneScore(rgb) {
+    const [red, green, blue] = rgb.map((value) => clamp(value) / 255);
+    const maximum = Math.max(red, green, blue);
+    const minimum = Math.min(red, green, blue);
+    const chroma = maximum - minimum;
+    if (chroma < .08 || red <= blue * 1.06) return 0;
+
+    let hue = 0;
+    if (maximum === red) hue = ((green - blue) / chroma) % 6;
+    else if (maximum === green) hue = (blue - red) / chroma + 2;
+    else hue = (red - green) / chroma + 4;
+    hue = (hue * 60 + 360) % 360;
+    const lightness = (maximum + minimum) / 2;
+    if (hue < 8 || hue > 55 || lightness < .18 || lightness > .94) return 0;
+
+    const hueFit = 1 - Math.min(1, Math.abs(hue - 30) / 25);
+    const lightFit = 1 - Math.min(1, Math.abs(lightness - .62) / .44);
+    return hueFit * lightFit * Math.min(1, chroma / .55);
+  }
+
+  function preserveSkinTone(entries, palette) {
+    if (!skinToneKeep || palette.length < 4) return palette;
+    const population = entries.reduce((sum, entry) => sum + entry.count, 0);
+    const minimumPixels = Math.max(2, Math.floor(population * .0005));
+    const candidate = entries
+      .filter((entry) => entry.count >= minimumPixels)
+      .map((entry) => ({ entry, score: skinToneScore(entry.rgb) * Math.sqrt(entry.count) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score)[0]?.entry;
+    if (!candidate || palette.some((color) => skinToneScore(color) > .35)) return palette;
+
+    const paletteLabs = palette.map(rgbToOklab);
+    const candidateLab = candidate.lab || rgbToOklab(candidate.rgb);
+    const nearest = paletteLabs.reduce((best, lab) => Math.min(best, Math.hypot(
+      (lab[0] - candidateLab[0]) * 1.2,
+      lab[1] - candidateLab[1],
+      lab[2] - candidateLab[2]
+    )), Infinity);
+    if (nearest < .035) return palette;
+
+    const coverage = new Array(palette.length).fill(0);
+    for (const entry of entries) {
+      let winner = 0;
+      let distance = Infinity;
+      for (let index = 0; index < paletteLabs.length; index += 1) {
+        const lab = paletteLabs[index];
+        const nextDistance = Math.hypot((entry.lab[0] - lab[0]) * 1.2, entry.lab[1] - lab[1], entry.lab[2] - lab[2]);
+        if (nextDistance < distance) {
+          winner = index;
+          distance = nextDistance;
+        }
+      }
+      coverage[winner] += entry.count;
+    }
+    const replaceIndex = coverage
+      .map((count, index) => ({ count, index, skin: skinToneScore(palette[index]) }))
+      .filter((item) => item.skin < .35)
+      .sort((left, right) => left.count - right.count)[0]?.index;
+    if (replaceIndex == null) return palette;
+
+    const next = palette.map((color) => [...color]);
+    next[replaceIndex] = candidate.rgb;
+    return next;
+  }
+
   // Accent preservation follows the operation concept of Raky's Pixel Art Mode.
   // The palette selection itself is an independent Holometer implementation.
   function adaptivePalette(values, alpha, count, preserveAccents = accentKeep) {
@@ -446,7 +519,7 @@
     });
     if (!entries.length) return [[0, 0, 0]];
     if (entries.length <= count) return entries.map((entry) => entry.rgb);
-    if (!preserveAccents || count < 4) return medianCutPalette(entries, count);
+    if (!preserveAccents || count < 4) return preserveSkinTone(entries, medianCutPalette(entries, count));
 
     const reserve = Math.min(8, Math.max(1, Math.round(count * .125)));
     const selected = medianCutPalette(entries, count);
@@ -498,7 +571,7 @@
       selectedLabs[replaceIndex] = lab;
       replacements += 1;
     }
-    return selected;
+    return preserveSkinTone(entries, selected);
   }
 
   /* AI補正用の色は、中央値分割を初期値にしてRGB重心へ収束させる。
@@ -561,7 +634,7 @@
       centroids = next;
       if (maximumMovement < 0.25) break;
     }
-    return dedupePaletteColors(centroids.map((color) => color.map((value) => Math.round(value))));
+    return preserveSkinTone(entries, dedupePaletteColors(centroids.map((color) => color.map((value) => Math.round(value)))));
   }
 
   function autoPaletteForSource(image, count) {
@@ -573,7 +646,7 @@
     }
     const saturationValue = Number(saturationBoost.value);
     const contrastValue = Number(contrastBoost.value);
-    const cacheKey = `${count}:${saturationValue}:${contrastValue}:${accentKeep ? 1 : 0}`;
+    const cacheKey = `${count}:${saturationValue}:${contrastValue}:${accentKeep ? 1 : 0}:${skinToneKeep ? 1 : 0}`;
     if (imageCache.has(cacheKey)) return imageCache.get(cacheKey);
 
     const imageWidth = image.naturalWidth || image.width;
@@ -630,6 +703,7 @@
       customInputs.map((input) => input.value),
       gridSnap,
       accentKeep,
+      skinToneKeep,
       gameHardware,
       outputDots
     ]);
@@ -637,8 +711,11 @@
 
   function restoreSettingsKey(settingsKey) {
     try {
-      const [style, pixel, colors, savedDither, savedFlatFill, savedOutline, savedBackground, ink, paper, threshold, saturation, contrast, edge, custom, savedGridSnap, savedAccentKeep, savedGameHardware] = JSON.parse(settingsKey);
-      if (savedGameHardware && gameHardwareSettings[savedGameHardware]) gameHardware = savedGameHardware;
+      const [style, pixel, colors, savedDither, savedFlatFill, savedOutline, savedBackground, ink, paper, threshold, saturation, contrast, edge, custom, savedGridSnap, savedAccentKeep, savedSkinToneKeep, savedGameHardware] = JSON.parse(settingsKey);
+      const restoredGameHardware = gameHardwareSettings[savedGameHardware]
+        ? savedGameHardware
+        : (gameHardwareSettings[savedSkinToneKeep] ? savedSkinToneKeep : null);
+      if (restoredGameHardware && gameHardwareSettings[restoredGameHardware]) gameHardware = restoredGameHardware;
       activeStyle = style;
       pixelSize.value = pixel;
       colorCount.value = colors;
@@ -646,6 +723,7 @@
       flatFill = savedFlatFill;
       gridSnap = savedGridSnap || styleSettings[style]?.gridSnap || "off";
       accentKeep = savedAccentKeep ?? styleSettings[style]?.accentKeep ?? false;
+      skinToneKeep = typeof savedSkinToneKeep === "boolean" ? savedSkinToneKeep : false;
       outline = savedOutline;
       toneBackground = savedBackground;
       inkColor.value = ink;
@@ -691,7 +769,7 @@
     return counts;
   }
 
-  function paletteMatcher(palette) {
+  function paletteMatcher(palette, protectNeutral = false) {
     const candidates = palette.map((rgb) => ({ rgb, lab: rgbToOklab(rgb) }));
     const cache = new Map();
     return (rgb) => {
@@ -703,11 +781,16 @@
       const lab = rgbToOklab([redBin * 8 + 4, greenBin * 8 + 4, blueBin * 8 + 4]);
       let result = candidates[0].rgb;
       let distance = Infinity;
+      const sourceChroma = Math.hypot(lab[1], lab[2]);
       for (const candidate of candidates) {
         const dl = (lab[0] - candidate.lab[0]) * 1.2;
         const da = lab[1] - candidate.lab[1];
         const db = lab[2] - candidate.lab[2];
-        const current = dl * dl + da * da + db * db;
+        const candidateChroma = Math.hypot(candidate.lab[1], candidate.lab[2]);
+        const chromaGrowth = protectNeutral && sourceChroma < 0.055
+          ? Math.max(0, candidateChroma - sourceChroma - 0.006)
+          : 0;
+        const current = dl * dl + da * da + db * db + chromaGrowth * chromaGrowth * 12;
         if (current < distance) {
           distance = current;
           result = candidate.rgb;
@@ -804,6 +887,45 @@
       rows[y] += Math.abs(tones[(y + 1) * width + x] - tones[(y - 1) * width + x]);
     }
     return { columns, rows };
+  }
+
+  function gridLineCandidate(keys, width, height, histogram, dominantKey) {
+    if (activeStyle !== "refine" || !dominantKey) return null;
+    const dominant = histogram.get(dominantKey)?.rgba;
+    if (!dominant) return null;
+    const brightness = (rgb) => rgb[0] * .299 + rgb[1] * .587 + rgb[2] * .114;
+    const dominantBrightness = brightness(dominant);
+    const runs = new Map();
+    const addRun = (key, length) => {
+      if (key === dominantKey || length < 2) return;
+      runs.set(key, Math.max(runs.get(key) || 0, length));
+    };
+
+    for (let y = 0; y < height; y += 1) {
+      let start = 0;
+      for (let x = 1; x <= width; x += 1) {
+        if (x === width || keys[y * width + x] !== keys[y * width + start]) {
+          addRun(keys[y * width + start], x - start);
+          start = x;
+        }
+      }
+    }
+    for (let x = 0; x < width; x += 1) {
+      let start = 0;
+      for (let y = 1; y <= height; y += 1) {
+        if (y === height || keys[y * width + x] !== keys[start * width + x]) {
+          addRun(keys[start * width + x], y - start);
+          start = y;
+        }
+      }
+    }
+
+    return [...runs.entries()]
+      .map(([key, run]) => ({ key, run, entry: histogram.get(key) }))
+      .filter(({ run, entry }) => entry
+        && run >= Math.max(2, Math.ceil(Math.min(width, height) * .7))
+        && brightness(entry.rgba) < dominantBrightness - 24)
+      .sort((left, right) => right.run - left.run || right.entry.count - left.entry.count)[0]?.entry || null;
   }
 
   function estimateGridStep(profile) {
@@ -990,6 +1112,9 @@
   const GRID_EDGE_STRENGTH = 0.5;   // 窓内のエッジがプロファイル平均のこの倍数未満なら理想位置を使う
   const GRID_MIN_CUTS = 5;
   const GRID_MIN_PERIODICITY = 0.25;  // これ未満は格子ではなく写真等とみなす
+  const GRID_MIN_REFINE_PERIODICITY = 0.42;  // AI補正は曖昧な格子を多数決で壊さない
+  const GRID_SMALL_SOURCE_EDGE = 512;  // 小さい完成絵は誤検出時の情報損失が大きいため保護する
+  const GRID_MIN_PHASE_ALIGNMENT = 0.62;  // 真の拡大格子はエッジが同じ位相へ集中する
   const GRID_OPAQUE_ALPHA = 128;  // これ未満の画素は縁のにじみとみなし、色を決める投票から外す
 
   function sanitizeGridCuts(cuts, limit) {
@@ -1132,6 +1257,34 @@
     return (correlation / (length - lag)) / (variance / length);
   }
 
+  /* 自己相関だけでは、絵の部品がたまたま同じ間隔で並んだ場合も格子と判定する。
+     本物の拡大ドット絵なら、縦横の境界は周期内の同じ1〜2pxへ集中するため、
+     エッジ量が最も集まる隣接2位相の割合も確認する。 */
+  function gridPhaseAlignment(profile, step) {
+    const phases = Math.max(2, Math.round(step));
+    if (phases < 4 || !profile.length) return 0;
+    const bins = new Float64Array(phases);
+    let total = 0;
+    for (let index = 0; index < profile.length; index += 1) {
+      bins[index % phases] += profile[index];
+      total += profile[index];
+    }
+    if (total <= 0) return 0;
+    let strongest = 0;
+    for (let phase = 0; phase < phases; phase += 1) {
+      strongest = Math.max(strongest, bins[phase] + bins[(phase + 1) % phases]);
+    }
+    return strongest / total;
+  }
+
+  function shouldPreserveSmallCraftSource(width, height, profiles, detectedStep) {
+    if (activeStyle !== "craft" || gridSizeAdjusted || Math.max(width, height) > GRID_SMALL_SOURCE_EDGE) return false;
+    return detectedStep < 4 || Math.min(
+      gridPhaseAlignment(profiles.columns, detectedStep),
+      gridPhaseAlignment(profiles.rows, detectedStep)
+    ) < GRID_MIN_PHASE_ALIGNMENT;
+  }
+
   function snapSourceGrid(source, sourceWidth, sourceHeight) {
     const imageWidth = source.naturalWidth || source.width;
     const imageHeight = source.naturalHeight || source.height;
@@ -1175,7 +1328,15 @@
       gridPeriodicity(profiles.columns, detectedStep),
       gridPeriodicity(profiles.rows, detectedStep)
     );
-    if (periodicity < GRID_MIN_PERIODICITY && !usesStructuredGrid()) return null;
+    const minimumPeriodicity = activeStyle === "refine" ? GRID_MIN_REFINE_PERIODICITY : GRID_MIN_PERIODICITY;
+    if (periodicity < minimumPeriodicity && activeStyle !== "craft") {
+      if (activeStyle === "refine") gridFallbackReason = "格子があいまいなため、線を保つ通常のピクセルアート処理で変換しています。";
+      return null;
+    }
+    if (shouldPreserveSmallCraftSource(analysis.width, analysis.height, profiles, detectedStep)) {
+      gridFallbackReason = "小さい画像に明確な拡大格子がないため、1pxの細線を保って変換しています。";
+      return { preserveNativeDetail: true };
+    }
     const outputScale = sourceWidth / imageWidth;
     const detectedBlock = detectedStep / analysisScale * outputScale;
     if (!gridSizeAdjusted) pixelSize.value = String(Math.max(1, Math.min(MAX_PIXEL_SIZE, Math.round(detectedBlock * 2) / 2)));
@@ -1195,6 +1356,7 @@
         analysis.width,
         analysis.height,
         step,
+        // AI補正と手打ち風は、理論セル数より元画像の実際の切れ目を優先する。
         usesStructuredGrid()
       ));
     }
@@ -1211,20 +1373,41 @@
     const usesQuantizedCellVoting = usesStructuredGrid();
     for (let row = 0; row < snapped.height; row += 1) for (let column = 0; column < snapped.width; column += 1) {
       const histogram = new Map();
+      const cellWidth = columns[column + 1] - columns[column];
+      const cellHeight = rows[row + 1] - rows[row];
+      const cellKeys = activeStyle === "refine" ? new Array(cellWidth * cellHeight) : null;
+      /* セルの縁の画素は、隣のセルの色と混ざっている（AI画像の輪郭は格子線の上に
+         乗っていないため）。それを代表色の多数決に入れると、明るい面のセルまで
+         輪郭の黒に引きずられて黒が太る。実測で暗部が元画像比+9〜18%あった。
+         内側だけで投票し、内側が取れないほど小さいセルでは従来どおり全域を使う。
+         考え方は PixelRefiner（MIT）の cell-sampler を参考にした。 */
+      const cellInset = Math.min(cellWidth, cellHeight) >= 3
+        ? Math.max(1, Math.min(3, Math.round(Math.min(cellWidth, cellHeight) / 8)))
+        : 0;
+      const coreLeft = columns[column] + cellInset;
+      const coreRight = columns[column + 1] - cellInset;
+      const coreTop = rows[row] + cellInset;
+      const coreBottom = rows[row + 1] - cellInset;
+      const hasCore = coreRight > coreLeft && coreBottom > coreTop;
       for (let y = rows[row]; y < rows[row + 1]; y += 1) for (let x = columns[column]; x < columns[column + 1]; x += 1) {
+        const insideCore = !hasCore || (x >= coreLeft && x < coreRight && y >= coreTop && y < coreBottom);
         const offset = (y * analysis.width + x) * 4;
         const alpha = analysisPixels[offset + 3];
-        /* 縁のアンチエイリアスは背景と混ざった色を持つ。これを不透明扱いで投票させると、
-           輪郭に沿って元絵に無い色（肌色の縁など）の筋が残る。半分以上不透明な画素だけ数える。 */
-        const quantizedColor = [
-          analysisPixels[offset],
-          analysisPixels[offset + 1],
-          analysisPixels[offset + 2],
-          alpha
-        ];
+        /* AI補正では半透明の輪郭を残すと、透明背景上で灰色のぼけに見える。
+           格子セルへまとめる段階で透明度だけを二値化し、色の多数決は維持する。 */
+        const quantizedColor = activeStyle === "refine"
+          ? (alpha < GRID_OPAQUE_ALPHA ? [0, 0, 0, 0] : [
+              analysisPixels[offset],
+              analysisPixels[offset + 1],
+              analysisPixels[offset + 2],
+              255
+            ])
+          : [analysisPixels[offset], analysisPixels[offset + 1], analysisPixels[offset + 2], alpha];
         const key = usesQuantizedCellVoting
           ? quantizedColor.join(",")
           : alpha < GRID_OPAQUE_ALPHA ? -1 : ((analysisPixels[offset] >> 4) << 8) | ((analysisPixels[offset + 1] >> 4) << 4) | (analysisPixels[offset + 2] >> 4);
+        if (cellKeys) cellKeys[(y - rows[row]) * cellWidth + (x - columns[column])] = key;
+        if (!insideCore) continue;
         const entry = histogram.get(key) || { count: 0, rgba: [0, 0, 0, 0] };
         entry.count += 1;
         if (usesQuantizedCellVoting) entry.rgba = quantizedColor;
@@ -1245,7 +1428,7 @@
       })[0];
       const target = (row * snapped.width + column) * 4;
       if (!winner || (!usesQuantizedCellVoting && winner[0] === -1)) continue;
-      const entry = winner[1];
+      const entry = gridLineCandidate(cellKeys, cellWidth, cellHeight, histogram, winner[0]) || winner[1];
       const divisor = usesQuantizedCellVoting ? 1 : entry.count;
       output.data[target] = Math.round(entry.rgba[0] / divisor);
       output.data[target + 1] = Math.round(entry.rgba[1] / divisor);
@@ -1253,6 +1436,7 @@
       output.data[target + 3] = Math.round(entry.rgba[3] / divisor);
     }
     snappedContext.putImageData(output, 0, 0);
+    gridFallbackReason = "";
     return { canvas: snapped, block: step / analysisScale * outputScale, detectedBlock, sourceWidth, sourceHeight };
   }
 
@@ -1311,6 +1495,150 @@
       return palettes.game.map(hexToRgb);
     }
     return (palettes[activeStyle] || palettes.retro).map(hexToRgb);
+  }
+
+  /* 小さい完成絵を1pxのまま減色すると、背景と輪郭の中間色まで独立色になり、
+     白背景上へ灰色のフリンジとして残る。外周から連続する単色背景だけを特定し、
+     背景の割合が半分を超える混合画素を背景へ戻して輪郭本体は残す。 */
+  function cleanOpaqueBackgroundFringe(data, width, height) {
+    if (width < 4 || height < 4 || Math.max(width, height) > GRID_SMALL_SOURCE_EDGE) return 0;
+    const source = new Uint8ClampedArray(data);
+    const bins = new Map();
+    let opaqueBorder = 0;
+    const collect = (index) => {
+      const offset = index * 4;
+      if (source[offset + 3] < 248) return;
+      opaqueBorder += 1;
+      const key = `${source[offset] >> 3},${source[offset + 1] >> 3},${source[offset + 2] >> 3}`;
+      const entry = bins.get(key) || { count: 0, sum: [0, 0, 0] };
+      entry.count += 1;
+      entry.sum[0] += source[offset];
+      entry.sum[1] += source[offset + 1];
+      entry.sum[2] += source[offset + 2];
+      bins.set(key, entry);
+    };
+    for (let x = 0; x < width; x += 1) {
+      collect(x);
+      collect((height - 1) * width + x);
+    }
+    for (let y = 1; y < height - 1; y += 1) {
+      collect(y * width);
+      collect(y * width + width - 1);
+    }
+    const borderSamples = width * 2 + Math.max(0, height - 2) * 2;
+    const backgroundEntry = [...bins.values()].sort((left, right) => right.count - left.count)[0];
+    if (!backgroundEntry || opaqueBorder < borderSamples * 0.6 || backgroundEntry.count < opaqueBorder * 0.6) return 0;
+    const background = backgroundEntry.sum.map((value) => value / backgroundEntry.count);
+    const colorDistanceSquared = (index) => {
+      const offset = index * 4;
+      const red = source[offset] - background[0];
+      const green = source[offset + 1] - background[1];
+      const blue = source[offset + 2] - background[2];
+      return red * red + green * green + blue * blue;
+    };
+
+    const backgroundMask = new Uint8Array(width * height);
+    const queue = new Int32Array(width * height);
+    let head = 0;
+    let tail = 0;
+    const seedLimit = 18 * 18;
+    const seed = (index) => {
+      if (backgroundMask[index] || source[index * 4 + 3] < 248 || colorDistanceSquared(index) > seedLimit) return;
+      backgroundMask[index] = 1;
+      queue[tail++] = index;
+    };
+    for (let x = 0; x < width; x += 1) {
+      seed(x);
+      seed((height - 1) * width + x);
+    }
+    for (let y = 1; y < height - 1; y += 1) {
+      seed(y * width);
+      seed(y * width + width - 1);
+    }
+    while (head < tail) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = Math.floor(index / width);
+      if (x > 0) seed(index - 1);
+      if (x + 1 < width) seed(index + 1);
+      if (y > 0) seed(index - width);
+      if (y + 1 < height) seed(index + width);
+    }
+
+    let changed = 0;
+    for (let pass = 0; pass < 2; pass += 1) {
+      const additions = [];
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const index = y * width + x;
+          const offset = index * 4;
+          if (backgroundMask[index] || source[offset + 3] < 248) continue;
+          let touchesBackground = false;
+          for (let dy = -1; dy <= 1 && !touchesBackground; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              const nx = x + dx;
+              const ny = y + dy;
+              if ((dx || dy) && nx >= 0 && nx < width && ny >= 0 && ny < height && backgroundMask[ny * width + nx]) {
+                touchesBackground = true;
+                break;
+              }
+            }
+          }
+          if (!touchesBackground) continue;
+
+          let foregroundIndex = -1;
+          let foregroundDistance = 0;
+          for (let dy = -2; dy <= 2; dy += 1) {
+            for (let dx = -2; dx <= 2; dx += 1) {
+              const nx = x + dx;
+              const ny = y + dy;
+              if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+              const candidate = ny * width + nx;
+              if (backgroundMask[candidate] || source[candidate * 4 + 3] < 128) continue;
+              const distance = colorDistanceSquared(candidate);
+              if (distance > foregroundDistance) {
+                foregroundDistance = distance;
+                foregroundIndex = candidate;
+              }
+            }
+          }
+          if (foregroundIndex < 0 || foregroundDistance < 24 * 24) continue;
+
+          const foregroundOffset = foregroundIndex * 4;
+          const vector = [
+            background[0] - source[foregroundOffset],
+            background[1] - source[foregroundOffset + 1],
+            background[2] - source[foregroundOffset + 2]
+          ];
+          const mixed = [
+            background[0] - source[offset],
+            background[1] - source[offset + 1],
+            background[2] - source[offset + 2]
+          ];
+          const denominator = vector[0] ** 2 + vector[1] ** 2 + vector[2] ** 2;
+          if (!denominator) continue;
+          const coverage = (mixed[0] * vector[0] + mixed[1] * vector[1] + mixed[2] * vector[2]) / denominator;
+          const residual = Math.sqrt((
+            (source[offset] - (background[0] - coverage * vector[0])) ** 2
+            + (source[offset + 1] - (background[1] - coverage * vector[1])) ** 2
+            + (source[offset + 2] - (background[2] - coverage * vector[2])) ** 2
+          ) / 3);
+          if (coverage >= 0.52 || residual >= 24) continue;
+          additions.push(index);
+        }
+      }
+      if (!additions.length) break;
+      for (const index of additions) {
+        const offset = index * 4;
+        backgroundMask[index] = 1;
+        data[offset] = background[0];
+        data[offset + 1] = background[1];
+        data[offset + 2] = background[2];
+        data[offset + 3] = 255;
+      }
+      changed += additions.length;
+    }
+    return changed;
   }
 
   function processPixels(data, width, height, palette, count) {
@@ -1422,7 +1750,7 @@
       return paperMode ? [ink, paper] : [ink];
     }
 
-    const pick = paletteMatcher(chosenPalette);
+    const pick = paletteMatcher(chosenPalette, activeStyle === "auto");
     const diffuse = (x, y, error, amount) => {
       if (x < 0 || x >= width || y < 0 || y >= height) return;
       const position = y * width + x;
@@ -1574,6 +1902,7 @@
     currentPaletteHex = safePalette.map(rgbToHex);
     if (paletteCopyButton) paletteCopyButton.disabled = currentPaletteHex.length === 0;
     if (paletteExportButton) paletteExportButton.disabled = currentPaletteHex.length === 0;
+    if (palettePngButton) palettePngButton.disabled = currentPaletteHex.length === 0;
     const sorted = [...safePalette].sort((left, right) => rgbToOklab(left)[0] - rgbToOklab(right)[0]);
     const visible = sorted.length <= 16
       ? sorted
@@ -1644,6 +1973,33 @@
       lines.push(`${pad(red)} ${pad(green)} ${pad(blue)}\t${hex.replace("#", "").toUpperCase()}`);
     }
     return `${lines.join("\n")}\n`;
+  }
+
+  /* 1色1pxの帯PNG。.gpl を読めないソフトでも「画像を開いて色を拾う」で使えるので、
+     対応範囲はこちらの方が広い。GIMPやPhotoshopでもそのまま開ける。 */
+  function exportPalettePng() {
+    if (editor.mode === "editing") return;
+    if (!currentPaletteHex.length) {
+      setStatus("画像を選ぶとパレットを保存できます。", true);
+      return;
+    }
+    const strip = document.createElement("canvas");
+    strip.width = currentPaletteHex.length;
+    strip.height = 1;
+    const context = strip.getContext("2d");
+    currentPaletteHex.forEach((hex, index) => {
+      context.fillStyle = hex;
+      context.fillRect(index, 0, 1, 1);
+    });
+    strip.toBlob((blob) => {
+      if (!blob) {
+        setStatus("パレットの書き出しに失敗しました。", true);
+        return;
+      }
+      downloadBlob(blob, "holometer-pixel-palette.png");
+      setStatus(`${currentPaletteHex.length}色のパレットを${currentPaletteHex.length}×1pxのPNGで保存しました。`);
+      track("palette_export_png", { colors: currentPaletteHex.length });
+    }, "image/png");
   }
 
   function exportPaletteFile() {
@@ -2298,6 +2654,9 @@
     document.querySelectorAll("[data-accent-keep]").forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.accentKeep === (accentKeep ? "on" : "off")));
     });
+    document.querySelectorAll("[data-skin-tone]").forEach((button) => {
+      button.setAttribute("aria-pressed", String(button.dataset.skinTone === (skinToneKeep ? "on" : "off")));
+    });
     document.querySelectorAll("[data-grid-snap]").forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.gridSnap === gridSnap));
     });
@@ -2312,9 +2671,9 @@
       ? (gameHardwareSettings[gameHardware] || gameHardwareSettings.gb).description
       : styleDescriptions[activeStyle];
     pixelSizeOut.textContent = `${Number(pixelSize.value).toFixed(1)} px`;
-    if (gridSnapStatus) gridSnapStatus.textContent = gridSnap === "auto"
+    if (gridSnapStatus) gridSnapStatus.textContent = gridFallbackReason || (gridSnap === "auto"
         ? (detectedGridSize ? `検出 ${detectedGridSize.toFixed(1)}px / 使用 ${appliedGridSize.toFixed(1)}px。スライダーで調整できます。` : "画像を選ぶと元のドット間隔を検出します。検出後もスライダーで調整できます。")
-        : "スライダーでドットの大きさを決めます。元の形を保ちやすいモードです。";
+        : "スライダーでドットの大きさを決めます。元の形を保ちやすいモードです。");
     saturationOut.textContent = `${saturationBoost.value}%`;
     contrastOut.textContent = `${contrastBoost.value}%`;
     edgeOut.textContent = `${edgeBoost.value}%`;
@@ -2324,6 +2683,9 @@
     const colorLocked = Boolean(fixed);
     colorCount.disabled = colorLocked;
     document.querySelectorAll("[data-accent-keep]").forEach((button) => {
+      button.disabled = colorLocked || isTwoTone();
+    });
+    document.querySelectorAll("[data-skin-tone]").forEach((button) => {
       button.disabled = colorLocked || isTwoTone();
     });
     if (isTwoTone()) colorCountOut.textContent = toneBackground === "paper" ? "2色" : "1色＋透明";
@@ -2351,6 +2713,7 @@
         currentPaletteHex = [];
         if (paletteCopyButton) paletteCopyButton.disabled = true;
         if (paletteExportButton) paletteExportButton.disabled = true;
+        if (palettePngButton) palettePngButton.disabled = true;
         paletteStatus.textContent = "画像を選ぶと色が表示されます";
       }
     }
@@ -2369,6 +2732,7 @@
     appliedGridSize = 0;
     gridSizeAdjusted = false;
     accentKeep = Boolean(next.accentKeep);
+    skinToneKeep = false;
     flatFill = next.flatFill;
     outline = next.outline;
     saturationBoost.value = String(next.saturation);
@@ -2425,9 +2789,18 @@
     /* サイズ指定中でも格子検出は通す。先に元絵のドットを組み直してから
        目的のドット数へ変換しないと、にじんだ元画像をそのまま間引くことになり
        縁の中間色を拾ってしまう。出力サイズの決定だけ指定値を優先する。 */
-    const snapped = gridSnap === "auto" && activeStyle !== "photo"
+    gridFallbackReason = "";
+    const gridResult = gridSnap === "auto" && activeStyle !== "photo"
       ? snapSourceGrid(sourceImage, sourceWidth, sourceHeight) : null;
-    const { width, height, block: appliedBlock } = resolveOutputSize(sourceWidth, sourceHeight, block, snapped);
+    const preserveNativeDetail = Boolean(gridResult?.preserveNativeDetail);
+    const snapped = preserveNativeDetail ? null : gridResult;
+    if (preserveNativeDetail && !gridSizeAdjusted) pixelSize.value = "1";
+    const { width, height, block: appliedBlock } = resolveOutputSize(
+      sourceWidth,
+      sourceHeight,
+      preserveNativeDetail ? 1 : block,
+      snapped
+    );
 
     smallCanvas.width = width;
     smallCanvas.height = height;
@@ -2450,8 +2823,9 @@
       }
       palette = paletteFromContext(smallContext, width, height, 64);
     } else {
-      const requestedPalette = fixed || stableAutoPalette(Number(colorCount.value));
       const pixels = smallContext.getImageData(0, 0, width, height);
+      if (preserveNativeDetail && activeStyle === "craft") cleanOpaqueBackgroundFringe(pixels.data, width, height);
+      const requestedPalette = fixed || (preserveNativeDetail ? null : stableAutoPalette(Number(colorCount.value)));
       palette = processPixels(pixels.data, width, height, requestedPalette, Number(colorCount.value));
       if (activeStyle === "craft") tidyPixelClusters(pixels.data, width, height);
       smallContext.putImageData(pixels, 0, 0);
@@ -2565,6 +2939,7 @@
       currentPaletteHex = editedBackup.paletteHex;
       if (paletteCopyButton) paletteCopyButton.disabled = currentPaletteHex.length === 0;
       if (paletteExportButton) paletteExportButton.disabled = currentPaletteHex.length === 0;
+      if (palettePngButton) palettePngButton.disabled = currentPaletteHex.length === 0;
       paletteStatus.textContent = editedBackup.paletteStatus;
       stageMeta.textContent = editedBackup.stageMeta;
       canvas.setAttribute("aria-label", editedBackup.canvasLabel);
@@ -2722,6 +3097,7 @@
         currentPaletteHex = previous.paletteHex;
         if (paletteCopyButton) paletteCopyButton.disabled = currentPaletteHex.length === 0;
         if (paletteExportButton) paletteExportButton.disabled = currentPaletteHex.length === 0;
+        if (palettePngButton) palettePngButton.disabled = currentPaletteHex.length === 0;
         paletteStatus.textContent = previous.paletteStatus;
         stageMeta.textContent = previous.stageMeta;
         canvas.setAttribute("aria-label", previous.canvasLabel);
@@ -2780,6 +3156,8 @@
     saveButton.disabled = true;
     resetButton.disabled = true;
     changeImageButton.textContent = "画像を選ぶ";
+    if (exportScale) exportScale.value = "1";
+    skinToneKeep = false;
     inkColor.value = "#0146ea";
     paperColor.value = "#f5f7fb";
     toneBackground = "paper";
@@ -2916,9 +3294,32 @@
     });
   }
 
+  function currentExportScale() {
+    const scale = Number(exportScale?.value);
+    return [1, 2, 3].includes(scale) ? scale : 1;
+  }
+
+  function exportCanvas(sourceCanvas) {
+    const scale = currentExportScale();
+    if (scale === 1) return sourceCanvas;
+
+    const width = sourceCanvas.width * scale;
+    const height = sourceCanvas.height * scale;
+    if (!width || !height || width * height > MAX_EXPORT_PIXELS) throw new Error("EXPORT SIZE LIMIT");
+
+    const enlarged = document.createElement("canvas");
+    enlarged.width = width;
+    enlarged.height = height;
+    const enlargedContext = enlarged.getContext("2d", { alpha: true });
+    enlargedContext.imageSmoothingEnabled = false;
+    enlargedContext.drawImage(sourceCanvas, 0, 0, width, height);
+    return enlarged;
+  }
+
   function canvasPngBytes(sourceCanvas) {
+    const target = exportCanvas(sourceCanvas);
     return new Promise((resolve, reject) => {
-      sourceCanvas.toBlob(async (blob) => {
+      target.toBlob(async (blob) => {
         if (!blob) {
           reject(new Error("PNG ENCODE FAILED"));
           return;
@@ -2948,9 +3349,17 @@
     const scale = Math.min(1, MAX_SOURCE_EDGE / Math.max(imageWidth, imageHeight));
     const sourceWidth = Math.max(1, Math.round(imageWidth * scale));
     const sourceHeight = Math.max(1, Math.round(imageHeight * scale));
-    const snapped = gridSnap === "auto" && activeStyle !== "photo"
+    gridFallbackReason = "";
+    const gridResult = gridSnap === "auto" && activeStyle !== "photo"
       ? snapSourceGrid(source, sourceWidth, sourceHeight) : null;
-    const { width, height, block: appliedBlock } = resolveOutputSize(sourceWidth, sourceHeight, block, snapped);
+    const preserveNativeDetail = Boolean(gridResult?.preserveNativeDetail);
+    const snapped = preserveNativeDetail ? null : gridResult;
+    const { width, height, block: appliedBlock } = resolveOutputSize(
+      sourceWidth,
+      sourceHeight,
+      preserveNativeDetail ? 1 : block,
+      snapped
+    );
 
     batchSmallCanvas.width = width;
     batchSmallCanvas.height = height;
@@ -2968,8 +3377,9 @@
       batchSmallContext.putImageData(pixels, 0, 0);
     } else if (!saveLogicalGrid) {
       const fixed = fixedPalette();
-      const requestedPalette = fixed || autoPaletteForSource(source, Number(colorCount.value));
       const pixels = batchSmallContext.getImageData(0, 0, width, height);
+      if (preserveNativeDetail && activeStyle === "craft") cleanOpaqueBackgroundFringe(pixels.data, width, height);
+      const requestedPalette = fixed || (preserveNativeDetail ? null : autoPaletteForSource(source, Number(colorCount.value)));
       processPixels(pixels.data, width, height, requestedPalette, Number(colorCount.value));
       if (activeStyle === "craft") tidyPixelClusters(pixels.data, width, height);
       batchSmallContext.putImageData(pixels, 0, 0);
@@ -2997,6 +3407,7 @@
       dither,
       gridSnap,
       accentKeep,
+      skinToneKeep,
       flatFill,
       outline,
       saturation: Number(saturationBoost.value),
@@ -3008,7 +3419,8 @@
         threshold: Number(toneThreshold.value),
         background: toneBackground
       },
-      customPalette: customInputs.map((control) => control.value)
+      customPalette: customInputs.map((control) => control.value),
+      exportScale: currentExportScale()
     };
   }
 
@@ -3057,7 +3469,7 @@
       const zipped = await zipBytes(outputFiles);
       downloadBlob(new Blob([zipped], { type: "application/zip" }), `${batchZipName}-pixel.zip`);
       setBatchStatus(`${Object.keys(outputFiles).length - 1}枚を書き出しました。${failures.length ? `${failures.length}件は設定JSONで確認できます。` : ""}`);
-      track("pixel_batch_download", { processed: Object.keys(outputFiles).length - 1, failed: failures.length });
+      track("pixel_batch_download", { processed: Object.keys(outputFiles).length - 1, failed: failures.length, export_scale: currentExportScale() });
     } catch (error) {
       console.error("[PIXEL MAKER BATCH]", error);
       setBatchStatus("一括書き出しに失敗しました。ZIPを分けるか、少ない色数でお試しください。", true);
@@ -3102,26 +3514,17 @@
       const sheetContext = sheet.getContext("2d", { alpha: true });
       sheetContext.imageSmoothingEnabled = false;
       frames.forEach((frame, index) => sheetContext.drawImage(frame, (index % columns) * cellWidth, Math.floor(index / columns) * cellHeight));
-      const blob = await new Promise((resolve, reject) => sheet.toBlob((value) => value ? resolve(value) : reject(new Error("PNG ENCODE FAILED")), "image/png"));
-      downloadBlob(blob, `${batchZipName}-sprite-${columns}x${rows}.png`);
+      const blob = await canvasToBlob(sheet);
+      downloadBlob(blob, `${batchZipName}-sprite-${columns}x${rows}${currentExportScale() > 1 ? `-${currentExportScale()}x` : ""}.png`);
       setBatchStatus(`${frames.length}フレームを${columns}列×${rows}行で保存しました。${batchEntries.length > entries.length ? `先頭${SPRITE_MAX_FRAMES}枚を使用。` : ""}`);
-      track("pixel_sprite_download", { frames: frames.length, columns, rows });
+      track("pixel_sprite_download", { frames: frames.length, columns, rows, export_scale: currentExportScale() });
     } catch (error) {
       console.error("[PIXEL MAKER SPRITE]", error);
-      setBatchStatus(error.message === "SPRITE SIZE LIMIT" ? "シートが大きすぎます。画像サイズかフレーム数を減らしてください。" : "スプライトシートを書き出せませんでした。", true);
+      setBatchStatus(["SPRITE SIZE LIMIT", "EXPORT SIZE LIMIT"].includes(error.message) ? "シートが大きすぎます。保存サイズかフレーム数を減らしてください。" : "スプライトシートを書き出せませんでした。", true);
     } finally {
       setBatchBusy(false);
       batchProgress.hidden = true;
     }
-  }
-
-  function dataUrlToBlob(dataUrl) {
-    const [header, encoded] = dataUrl.split(",");
-    const type = header.match(/data:([^;]+)/)?.[1] || "image/png";
-    const binary = window.atob(encoded);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    return new Blob([bytes], { type });
   }
 
   function downloadBlob(blob, fileName) {
@@ -3135,11 +3538,11 @@
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  function canvasToBlob() {
+  function canvasToBlob(sourceCanvas = outputCanvas()) {
     /* 画面のcanvasは見やすさのために拡大してあるので、そのまま保存すると
        出力サイズを指定しても元画像と同じ大きさのPNGになる。
        指定がある時はドット等倍の smallCanvas（編集内容も反映済み）を書き出す。 */
-    const target = outputCanvas();
+    const target = exportCanvas(sourceCanvas);
     return new Promise((resolve, reject) => {
       target.toBlob((blob) => {
         if (blob) resolve(blob);
@@ -3171,14 +3574,15 @@
     }
 
     const stamp = new Date().toISOString().slice(0, 10);
-    const fileName = `holometer-pixel-${stamp}.png`;
+    const scale = currentExportScale();
+    const fileName = `holometer-pixel-${stamp}${scale > 1 ? `-${scale}x` : ""}.png`;
     saveButton.disabled = true;
     setStatus("PNGを準備しています…");
 
     try {
       const isTouch = navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches;
       if (isTouch && typeof navigator.share === "function" && typeof navigator.canShare === "function" && typeof File === "function") {
-        const blob = dataUrlToBlob(outputCanvas().toDataURL("image/png"));
+        const blob = await canvasToBlob();
         const file = new File([blob], fileName, { type: "image/png", lastModified: Date.now() });
         if (navigator.canShare({ files: [file] })) {
           try {
@@ -3197,11 +3601,11 @@
       } else {
         downloadBlob(await canvasToBlob(), fileName);
       }
-      setStatus("PNGの保存を開始しました。");
-      track("pixel_image_download");
+      setStatus(`${scale > 1 ? `${scale}倍` : "等倍"}PNGの保存を開始しました。`);
+      track("pixel_image_download", { export_scale: scale });
     } catch (error) {
       console.error("[PIXEL MAKER SAVE]", error);
-      setStatus("保存できませんでした。ブラウザの保存設定を確認して、もう一度お試しください。", true);
+      setStatus(error.message === "EXPORT SIZE LIMIT" ? "画像が大きすぎます。保存サイズを下げてもう一度お試しください。" : "保存できませんでした。ブラウザの保存設定を確認して、もう一度お試しください。", true);
     } finally {
       saveButton.disabled = false;
     }
@@ -3228,6 +3632,14 @@
     updateControlState();
     scheduleRender("細部の色の残し方を変更しました。");
     track("pixel_accent_keep_change", { accent_keep: value });
+  }
+
+  function setSkinToneKeep(value) {
+    if (!["off", "on"].includes(value)) return;
+    skinToneKeep = value === "on";
+    updateControlState();
+    scheduleRender(skinToneKeep ? "肌に近い暖色を優先する設定にしました。" : "色の優先をバランスへ戻しました。");
+    track("pixel_skin_tone_priority_change", { skin_tone: value });
   }
 
   function setGridSnap(value) {
@@ -3302,6 +3714,7 @@
   saveButton.addEventListener("click", saveImage);
   paletteCopyButton?.addEventListener("click", copyPaletteCodes);
   paletteExportButton?.addEventListener("click", exportPaletteFile);
+  palettePngButton?.addEventListener("click", exportPalettePng);
   input.addEventListener("change", () => {
     clearBatch();
     loadFile(input.files?.[0]);
@@ -3329,6 +3742,9 @@
   });
   document.querySelectorAll("[data-accent-keep]").forEach((button) => {
     button.addEventListener("click", () => setAccentKeep(button.dataset.accentKeep));
+  });
+  document.querySelectorAll("[data-skin-tone]").forEach((button) => {
+    button.addEventListener("click", () => setSkinToneKeep(button.dataset.skinTone));
   });
   document.querySelectorAll("[data-grid-snap]").forEach((button) => {
     button.addEventListener("click", () => setGridSnap(button.dataset.gridSnap));

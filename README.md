@@ -60,10 +60,10 @@ Current results on the 22 synthetic fixtures:
 
 | mode | exact | within ±5% |
 |---|---|---|
-| `auto` | 19/22 | 21/22 |
+| `auto` | 20/22 | 22/22 |
 | `refine` | 5/22 | 19/22 |
 
-On a set of 10 real AI-generated images: 6/10 within ±5%.
+On a set of 10 real AI-generated images: 2/10 exact, 6/10 within ±5%.
 
 **Read this before trusting those numbers.** Synthetic fixtures are drawn
 with a perfect lattice, so they reward exactly the thing the algorithm
@@ -85,9 +85,12 @@ this problem, verify the labels the same way — a period estimator that
 disagrees with a label is evidence about the label too, not only about the
 estimator.
 
-Known failures with confirmed labels: two images at a 7.99px true pitch are
-detected near 8.4px (157 dots read as 149 and 148), a systematic ~5%
-undercount.
+Known failure: images with very fine cells (3-5px) can fail detection
+outright and fall back to the dot-size slider's value, which is not a
+detection error so much as a bad fallback — two 1254px images land on
+exactly 157 dots because the slider sits at 8px. Fine cells are also where
+the ground-truth audit below runs out of resolution, so this is the most
+valuable thing left to fix.
 
 A second "known failure" listed here previously — coarse grids (~16 dots)
 detected at ~2× — turned out **not** to be a detection error at all. A 1024px
@@ -95,6 +98,21 @@ image drawn at 16 dots has 64px cells; the detector found 64px correctly, but
 a 36px cap on dot size re-cut the image into ~30 dots. Raising the cap fixed
 it. Worth remembering: a plausible story about the algorithm is not evidence
 about the algorithm.
+
+## Black bleeding, and why cell interiors matter
+
+Output used to carry noticeably more black than the source: 9-18% more dark
+pixels, measured across three modes. The cause is structural. Hand-drawn
+pixel art puts one deliberate colour in each cell, so outlines sit exactly on
+the grid. An AI image's outlines do not — a 1px dark edge straddles two
+cells. Every cell still has to collapse to one colour, and the edge pixels,
+blended with the neighbouring cell, drag light cells toward the outline.
+
+Voting on the cell **interior** instead of the whole cell fixes a good part
+of it (13.07% -> 12.36% dark pixels against a 11.44% source, in the AI
+correction mode), with grid detection untouched. PixelRefiner reaches the
+same conclusion from the other direction: its medoid sampler restricts the
+distance population to the cell core for exactly this reason.
 
 ## What we tried and reverted
 

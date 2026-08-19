@@ -116,6 +116,8 @@ main,
   line-height: 1.12;
 }
 
+.tool-intro h1 span { display: inline-block; }
+
 .tool-intro > p:last-child {
   max-width: 640px;
   margin: var(--hm-space-3) 0 0;
@@ -331,6 +333,36 @@ main,
 }
 
 .main-actions.has-edit { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.save-control {
+  display: flex;
+  align-items: stretch;
+  gap: var(--hm-space-2);
+}
+
+.save-control label {
+  min-width: 76px;
+  display: grid;
+  gap: 3px;
+  color: var(--hm-copy-muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+
+.save-control select {
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 22px 4px 8px;
+  border: 1px solid var(--hm-line);
+  border-radius: var(--hm-radius-inner);
+  color: var(--hm-copy);
+  background: var(--hm-surface);
+  font: inherit;
+  font-size: 12px;
+}
+
+.save-control .primary-button { flex: 1; }
 
 .primary-button,
 .secondary-button {
@@ -1103,7 +1135,7 @@ main,
   .main-actions.has-edit { grid-template-columns: 1fr; }
   .batch-actions { align-items: stretch; flex-direction: column; }
   .sprite-actions { grid-template-columns: 1fr; }
-  #saveButton { grid-row: 1; }
+  .save-control { grid-row: 1; }
   #editToggleButton { grid-row: 2; }
   #changeImageButton { grid-row: 3; }
   .edited-note { align-items: flex-start; flex-direction: column; }

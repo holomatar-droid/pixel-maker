@@ -26,5 +26,16 @@ our approach, and because anyone working on this problem should read them.
   Geometric median (Weiszfeld) for picking a cell's representative colour,
   which is more outlier-resistant than a mean. Not yet implemented here.
 
+- **HappyOnigiri / PixelRefiner** (MIT) —
+  https://github.com/HappyOnigiri/PixelRefiner
+  The closest peer to this project: same problem, same in-browser
+  constraint. Two ideas we acted on. Its cell sampler restricts the
+  representative-colour population to the cell core because boundary pixels
+  are blended with the neighbour — that is the fix for our black bleeding.
+  Its grid search also runs five separate signals (colour boundary,
+  luminance/alpha, autocorrelation, reconstruction error, local phase) and
+  uses reconstruction error to arbitrate harmonics, rather than penalising
+  them unconditionally as we first tried.
+
 - **univeous / Pixel-Extractor** (MIT) — https://github.com/univeous/Pixel-Extractor
   Handles non-square pixel cells. Not yet implemented here.
