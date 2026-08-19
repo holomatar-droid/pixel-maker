@@ -830,6 +830,9 @@
   const BLEND_MIN_ADJACENCY = 0.85;  // 画素のうち、その2色に隣接している割合
   const BLEND_MIN_POSITION = 0.08;   // 端に寄ったにじみも拾う（実測 #d9d9d9 は白寄り87%）
   const BLEND_MAX_COLORS = 96;       // 走査対象の色数上限（重くしないため）
+  /* にじみは必ず「目立つ2色」の間にできる。端点を総当たりすると色数の3乗になり、
+     102×100ドットでも600ms近くかかっていた。端点は上位色だけに絞る。 */
+  const BLEND_MAX_ENDPOINTS = 12;
 
   function suppressBlendColors(data, width, height) {
     const total = width * height;
@@ -858,13 +861,14 @@
       .slice(0, BLEND_MAX_COLORS);
     for (const entry of entries) entry.lab = rgbToOklab(entry.rgb);
 
+    const endpoints = entries.slice(0, BLEND_MAX_ENDPOINTS);
     const remap = new Map();
     for (const candidate of entries) {
       if (candidate.count / opaque > BLEND_MAX_SHARE) continue;
       let best = null;
-      for (const first of entries) {
+      for (const first of endpoints) {
         if (first.key === candidate.key || first.count <= candidate.count) continue;
-        for (const second of entries) {
+        for (const second of endpoints) {
           if (second.key === candidate.key || second.key === first.key) continue;
           if (second.count <= candidate.count) continue;
           const ax = second.lab[0] - first.lab[0];
@@ -988,90 +992,6 @@
     context.putImageData(image, 0, 0);
   }
 
-  function suppressBlendColors(data, width, height) {
-    const counts = new Map();
-    for (let index = 0; index < width * height; index += 1) {
-      const offset = index * 4;
-      if (data[offset + 3] < 8) continue;
-      const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
-      counts.set(key, (counts.get(key) || 0) + 1);
-    }
-    if (counts.size < 3) return;
-    let total = 0;
-    for (const value of counts.values()) total += value;
-    const entries = [...counts.entries()]
-      .map(([key, count]) => ({
-        key,
-        count,
-        rgb: [(key >> 16) & 255, (key >> 8) & 255, key & 255]
-      }))
-      .sort((left, right) => right.count - left.count);
-    for (const entry of entries) entry.lab = rgbToOklab(entry.rgb);
-
-    const remap = new Map();
-    for (const candidate of entries) {
-      if (candidate.count / total > BLEND_MAX_SHARE) continue;
-      let best = null;
-      for (const first of entries) {
-        if (first.key === candidate.key || first.count <= candidate.count) continue;
-        for (const second of entries) {
-          if (second.key === candidate.key || second.key === first.key) continue;
-          if (second.count <= candidate.count) continue;
-          const ax = second.lab[0] - first.lab[0];
-          const ay = second.lab[1] - first.lab[1];
-          const az = second.lab[2] - first.lab[2];
-          const lengthSquared = ax * ax + ay * ay + az * az;
-          if (lengthSquared <= 1e-9) continue;
-          const bx = candidate.lab[0] - first.lab[0];
-          const by = candidate.lab[1] - first.lab[1];
-          const bz = candidate.lab[2] - first.lab[2];
-          const position = (bx * ax + by * ay + bz * az) / lengthSquared;
-          /* 端の近くは「にじみ」ではなく単に似た色。中ほどだけを対象にする */
-          if (position < 0.2 || position > 0.8) continue;
-          const dx = bx - ax * position;
-          const dy = by - ay * position;
-          const dz = bz - az * position;
-          const offset = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (offset > BLEND_MAX_OFFSET) continue;
-          if (!best || offset < best.offset) best = { offset, first, second, position };
-        }
-      }
-      if (!best) continue;
-      /* 空間的な裏取り: にじみなら、その画素は2色の境目にしか無いはず */
-      let touching = 0;
-      let seen = 0;
-      for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
-        const index = y * width + x;
-        const offset = index * 4;
-        if (data[offset + 3] < 8) continue;
-        const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
-        if (key !== candidate.key) continue;
-        seen += 1;
-        let neighbour = false;
-        for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
-          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-          const near = (ny * width + nx) * 4;
-          if (data[near + 3] < 8) continue;
-          const nearKey = (data[near] << 16) | (data[near + 1] << 8) | data[near + 2];
-          if (nearKey === best.first.key || nearKey === best.second.key) { neighbour = true; break; }
-        }
-        if (neighbour) touching += 1;
-      }
-      if (!seen || touching / seen < BLEND_MIN_ADJACENCY) continue;
-      remap.set(candidate.key, best.position < 0.5 ? best.first.rgb : best.second.rgb);
-    }
-    if (!remap.size) return;
-    for (let index = 0; index < width * height; index += 1) {
-      const offset = index * 4;
-      if (data[offset + 3] < 8) continue;
-      const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
-      const replacement = remap.get(key);
-      if (!replacement) continue;
-      data[offset] = replacement[0];
-      data[offset + 1] = replacement[1];
-      data[offset + 2] = replacement[2];
-    }
-  }
 
   function mergeSimilarPaletteColors(palette, weights) {
     if (flatFill === "off" || palette.length < 2) return palette;
