@@ -85,12 +85,19 @@ this problem, verify the labels the same way — a period estimator that
 disagrees with a label is evidence about the label too, not only about the
 estimator.
 
-Known failure: images with very fine cells (3-5px) can fail detection
-outright and fall back to the dot-size slider's value, which is not a
-detection error so much as a bad fallback — two 1254px images land on
-exactly 157 dots because the slider sits at 8px. Fine cells are also where
-the ground-truth audit below runs out of resolution, so this is the most
-valuable thing left to fix.
+Known failure: images with very fine cells (3-5px) can fail the detector's
+confidence gate. The gate exists to stop photographs being cut on imaginary
+grids, and it earns its keep — but on fine pixel art it also rejects answers
+that were right, and the tool then falls back to whatever the dot-size
+slider happens to hold. Two 1254px images both came out at exactly 157 dots
+because the slider sat at 8px.
+
+The rejected candidates were good: 426 against a truth of 418, and 266
+against 251. So rather than lowering the gate and breaking photographs, the
+tool now offers what the gate rejected as a one-tap suggestion. That turns a
+silent 62% error into one click — but it does not make the detector more
+certain, and fine cells remain the place where this repo's ground-truth
+audit runs out of resolution too.
 
 A second "known failure" listed here previously — coarse grids (~16 dots)
 detected at ~2× — turned out **not** to be a detection error at all. A 1024px

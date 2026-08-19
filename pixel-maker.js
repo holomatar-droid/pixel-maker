@@ -117,6 +117,7 @@
   const colorCount = document.getElementById("colorCount");
   const pixelSizeOut = document.getElementById("pixelSizeOut");
   const gridSnapStatus = document.getElementById("gridSnapStatus");
+  const gridSuggestButton = document.getElementById("gridSuggestButton");
   const colorCountOut = document.getElementById("colorCountOut");
   const palettePreview = document.getElementById("palettePreview");
   const paletteStatus = document.getElementById("paletteStatus");
@@ -217,6 +218,12 @@
   let detectedGridSize = 0;
   let appliedGridSize = 0;
   let gridSizeAdjusted = false;
+  /* 確信度の門で捨てた候補を、消さずに覚えておく。写真を壊さないための門なので
+     自動では採用しないが、実測では捨てた候補の方が正しいことがある
+     （真値418ドットの画像で、採用値157に対し捨てた候補は426＝誤差+1.9%）。
+     ユーザーが1タップで採用できるようにする。 */
+  let uncertainGridBlock = 0;
+  let gridConfidenceOverride = false;
   let gridFallbackReason = "";
   let accentKeep = false;
   let skinToneKeep = false;
@@ -1329,10 +1336,13 @@
       gridPeriodicity(profiles.rows, detectedStep)
     );
     const minimumPeriodicity = activeStyle === "refine" ? GRID_MIN_REFINE_PERIODICITY : GRID_MIN_PERIODICITY;
-    if (periodicity < minimumPeriodicity && activeStyle !== "craft") {
+    if (periodicity < minimumPeriodicity && activeStyle !== "craft" && !gridConfidenceOverride) {
+      uncertainGridBlock = Math.max(1, Math.min(MAX_PIXEL_SIZE,
+        Math.round(detectedStep / analysisScale * (sourceWidth / imageWidth) * 2) / 2));
       if (activeStyle === "refine") gridFallbackReason = "格子があいまいなため、線を保つ通常のピクセルアート処理で変換しています。";
       return null;
     }
+    uncertainGridBlock = 0;
     if (shouldPreserveSmallCraftSource(analysis.width, analysis.height, profiles, detectedStep)) {
       gridFallbackReason = "小さい画像に明確な拡大格子がないため、1pxの細線を保って変換しています。";
       return { preserveNativeDetail: true };
@@ -2641,6 +2651,14 @@
     document.querySelectorAll("[data-output-dots]").forEach((button) => {
     button.addEventListener("click", () => setOutputDots(button.dataset.outputDots));
   });
+  gridSuggestButton?.addEventListener("click", () => {
+    /* 門を今回だけ無効にして、格子を揃える処理をそのまま通す。
+       スライダーだけ合わせても格子には吸着しないので、結果が別物になる。 */
+    gridConfidenceOverride = true;
+    gridFallbackReason = "";
+    scheduleRender("検出した格子で作り直しました。");
+  });
+
   pixelSize.addEventListener("input", () => { if (outputDots > 0) setOutputDots(0); });
   document.querySelectorAll("[data-game-hardware]").forEach((button) => {
     button.addEventListener("click", () => setGameHardware(button.dataset.gameHardware));
@@ -2671,6 +2689,11 @@
       ? (gameHardwareSettings[gameHardware] || gameHardwareSettings.gb).description
       : styleDescriptions[activeStyle];
     pixelSizeOut.textContent = `${Number(pixelSize.value).toFixed(1)} px`;
+    if (gridSuggestButton) {
+      const suggest = uncertainGridBlock > 0 && gridSnap === "auto";
+      gridSuggestButton.hidden = !suggest;
+      if (suggest) gridSuggestButton.textContent = `${uncertainGridBlock.toFixed(1)}pxで試す`;
+    }
     if (gridSnapStatus) gridSnapStatus.textContent = gridFallbackReason || (gridSnap === "auto"
         ? (detectedGridSize ? `検出 ${detectedGridSize.toFixed(1)}px / 使用 ${appliedGridSize.toFixed(1)}px。スライダーで調整できます。` : "画像を選ぶと元のドット間隔を検出します。検出後もスライダーで調整できます。")
         : "スライダーでドットの大きさを決めます。元の形を保ちやすいモードです。");
@@ -2731,6 +2754,8 @@
     detectedGridSize = 0;
     appliedGridSize = 0;
     gridSizeAdjusted = false;
+    gridConfidenceOverride = false;
+    uncertainGridBlock = 0;
     accentKeep = Boolean(next.accentKeep);
     skinToneKeep = false;
     flatFill = next.flatFill;
@@ -2994,6 +3019,11 @@
       setStatus("画像が20MBを超えています。小さい画像を選んでください。", true);
       return;
     }
+
+    /* 画像が変われば格子の確信度も変わる。前の画像で採用した上書きを
+       持ち越すと、次の画像が黙って別の刻み方になる。 */
+    gridConfidenceOverride = false;
+    uncertainGridBlock = 0;
 
     isLoadingImage = true;
     syncEditorModeUi();
@@ -3648,6 +3678,8 @@
     detectedGridSize = 0;
     appliedGridSize = 0;
     gridSizeAdjusted = false;
+    gridConfidenceOverride = false;
+    uncertainGridBlock = 0;
     updateControlState();
     scheduleRender("グリッドの決め方を変更しました。");
     track("pixel_grid_snap_change", { grid_snap: value });
