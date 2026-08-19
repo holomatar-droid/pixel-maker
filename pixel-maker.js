@@ -1475,8 +1475,8 @@
     return strongest / total;
   }
 
-  function shouldPreserveSmallCraftSource(width, height, profiles, detectedStep) {
-    if (activeStyle !== "craft" || gridSizeAdjusted || Math.max(width, height) > GRID_SMALL_SOURCE_EDGE) return false;
+  function shouldPreserveSmallStructuredSource(width, height, profiles, detectedStep) {
+    if (!usesStructuredGrid() || gridSizeAdjusted || Math.max(width, height) > GRID_SMALL_SOURCE_EDGE) return false;
     return detectedStep < 4 || Math.min(
       gridPhaseAlignment(profiles.columns, detectedStep),
       gridPhaseAlignment(profiles.rows, detectedStep)
@@ -1551,14 +1551,25 @@
     const minimumPeriodicity = activeStyle === "refine" && !useLargeAlignedPeak
       ? GRID_MIN_REFINE_PERIODICITY
       : GRID_MIN_PERIODICITY;
+    const preserveSmallSource = shouldPreserveSmallStructuredSource(
+      analysis.width,
+      analysis.height,
+      profiles,
+      detectedStep
+    );
     if (periodicity < minimumPeriodicity && activeStyle !== "craft" && !gridConfidenceOverride) {
+      if (preserveSmallSource) {
+        uncertainGridBlock = 0;
+        gridFallbackReason = "小さい画像に明確な拡大格子がないため、1pxの細線を保って変換しています。";
+        return { preserveNativeDetail: true };
+      }
       uncertainGridBlock = Math.max(1, Math.min(MAX_PIXEL_SIZE,
         Math.round(detectedStep / analysisScale * (sourceWidth / imageWidth) * 2) / 2));
       if (activeStyle === "refine") gridFallbackReason = "格子があいまいなため、線を保つ通常のピクセルアート処理で変換しています。";
       return null;
     }
     uncertainGridBlock = 0;
-    if (shouldPreserveSmallCraftSource(analysis.width, analysis.height, profiles, detectedStep)) {
+    if (preserveSmallSource) {
       gridFallbackReason = "小さい画像に明確な拡大格子がないため、1pxの細線を保って変換しています。";
       return { preserveNativeDetail: true };
     }
