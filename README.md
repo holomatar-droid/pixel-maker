@@ -63,7 +63,15 @@ Current results on the 22 synthetic fixtures:
 | `auto` | 20/22 | 22/22 |
 | `refine` | 5/22 | 19/22 |
 
-On a set of 10 real AI-generated images: 2/10 exact, 6/10 within ±5%.
+On real AI-generated images, measured on both axes:
+
+| set | exact | within ±5% |
+|---|---|---|
+| 12 images with pitch verified two ways | 3/12 | **12/12** |
+| an older set of 10, four of whose labels cannot be verified | 2/10 | 6/10 |
+
+Sprite Fusion Pixel Snapper scores 12/12 on the same verified twelve, so the
+two tools are level there; the older set is where this one still loses.
 
 **Read this before trusting those numbers.** Synthetic fixtures are drawn
 with a perfect lattice, so they reward exactly the thing the algorithm

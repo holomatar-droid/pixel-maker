@@ -1500,10 +1500,29 @@
     const sourcePixels = analysisContext.getImageData(0, 0, analysis.width, analysis.height);
     const analysisPixels = gridAnalysisPixels(sourcePixels.data, analysis.width, analysis.height);
     const profiles = gridProfiles(analysisPixels, analysis.width, analysis.height);
-    const estimatedColumnStep = estimateGridStepByPeriod(profiles.columns)
-      ?? estimateGridStep(profiles.columns) ?? estimateGridStepPlateau(profiles.columns);
-    const estimatedRowStep = estimateGridStepByPeriod(profiles.rows)
-      ?? estimateGridStep(profiles.rows) ?? estimateGridStepPlateau(profiles.rows);
+    const columnPeriodStep = estimateGridStepByPeriod(profiles.columns);
+    const rowPeriodStep = estimateGridStepByPeriod(profiles.rows);
+    const compareLargePeaks = activeStyle === "refine" && analysisScale < 1;
+    const columnPeakStep = compareLargePeaks || columnPeriodStep == null
+      ? estimateGridStep(profiles.columns)
+      : null;
+    const rowPeakStep = compareLargePeaks || rowPeriodStep == null
+      ? estimateGridStep(profiles.rows)
+      : null;
+    const peakRatio = columnPeakStep && rowPeakStep
+      ? Math.max(columnPeakStep, rowPeakStep) / Math.min(columnPeakStep, rowPeakStep)
+      : Infinity;
+    /* 大きな画像を解析用へ縮めると、自己相関が真の周期ではなく2倍・3倍の
+       倍周期を選ぶことがある。独立した両軸のピーク中央値が近い場合だけ、
+       そちらを基本周期として採用する。小画像や他モードには適用しない。 */
+    const useLargeAlignedPeak = compareLargePeaks
+      && peakRatio <= 1.15;
+    const estimatedColumnStep = useLargeAlignedPeak
+      ? columnPeakStep ?? columnPeriodStep ?? estimateGridStepPlateau(profiles.columns)
+      : columnPeriodStep ?? columnPeakStep ?? estimateGridStepPlateau(profiles.columns);
+    const estimatedRowStep = useLargeAlignedPeak
+      ? rowPeakStep ?? rowPeriodStep ?? estimateGridStepPlateau(profiles.rows)
+      : rowPeriodStep ?? rowPeakStep ?? estimateGridStepPlateau(profiles.rows);
     /* Pixel Snapper互換の補正では、ピーク間隔の中央値をそのまま使う。
        通常モード向けの細分化を重ねると16px格子を8pxと誤認し、
        論理サイズが縦横とも約2倍になってベタ面が細切れになる。 */
@@ -1526,7 +1545,12 @@
       gridPeriodicity(profiles.columns, detectedStep),
       gridPeriodicity(profiles.rows, detectedStep)
     );
-    const minimumPeriodicity = activeStyle === "refine" ? GRID_MIN_REFINE_PERIODICITY : GRID_MIN_PERIODICITY;
+    /* 両軸のピーク中央値が一致している時は、通常の格子検出と同じ閾値でよい。
+       AI補正の厳しい閾値を維持すると、正しい周期でも片軸の相関だけが弱い
+       縦長画像を通常変換へ落としてしまう。 */
+    const minimumPeriodicity = activeStyle === "refine" && !useLargeAlignedPeak
+      ? GRID_MIN_REFINE_PERIODICITY
+      : GRID_MIN_PERIODICITY;
     if (periodicity < minimumPeriodicity && activeStyle !== "craft" && !gridConfidenceOverride) {
       uncertainGridBlock = Math.max(1, Math.min(MAX_PIXEL_SIZE,
         Math.round(detectedStep / analysisScale * (sourceWidth / imageWidth) * 2) / 2));
