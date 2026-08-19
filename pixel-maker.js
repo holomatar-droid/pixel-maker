@@ -724,7 +724,7 @@
 
   function restoreSettingsKey(settingsKey) {
     try {
-      const [style, pixel, colors, savedDither, savedFlatFill, savedOutline, savedBackground, ink, paper, threshold, saturation, contrast, edge, custom, savedGridSnap, savedAccentKeep, savedSkinToneKeep, savedGameHardware] = JSON.parse(settingsKey);
+      const [style, pixel, colors, savedDither, savedFlatFill, savedOutline, savedBackground, ink, paper, threshold, saturation, contrast, edge, custom, savedGridSnap, savedBackgroundCut, savedAccentKeep, savedSkinToneKeep, savedGameHardware, savedOutputDots] = JSON.parse(settingsKey);
       const restoredGameHardware = gameHardwareSettings[savedGameHardware]
         ? savedGameHardware
         : (gameHardwareSettings[savedSkinToneKeep] ? savedSkinToneKeep : null);
@@ -735,6 +735,8 @@
       dither = savedDither;
       flatFill = savedFlatFill;
       gridSnap = savedGridSnap || styleSettings[style]?.gridSnap || "off";
+      backgroundCut = savedBackgroundCut === "auto" ? "auto" : "keep";
+      outputDots = Number.isFinite(savedOutputDots) ? savedOutputDots : 0;
       accentKeep = savedAccentKeep ?? styleSettings[style]?.accentKeep ?? false;
       skinToneKeep = typeof savedSkinToneKeep === "boolean" ? savedSkinToneKeep : false;
       outline = savedOutline;
@@ -926,6 +928,9 @@
     const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
     return key === best.first.key || key === best.second.key;
   }
+
+  const BG_MATCH_DISTANCE = 0.10;   // 背景と同じとみなす距離（OkLab）
+  const BG_FRINGE_DISTANCE = 0.22;  // 縁に残った中間色を掃除する距離
 
   function removeFlatBackground(context, width, height) {
     if (width < 3 || height < 3) return;
@@ -2906,22 +2911,7 @@
     document.querySelectorAll("[data-style]").forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.style === activeStyle));
     });
-    document.querySelectorAll("[data-output-dots]").forEach((button) => {
-    button.addEventListener("click", () => setOutputDots(button.dataset.outputDots));
-  });
-  gridSuggestButton?.addEventListener("click", () => {
-    /* 門を今回だけ無効にして、格子を揃える処理をそのまま通す。
-       スライダーだけ合わせても格子には吸着しないので、結果が別物になる。 */
-    gridConfidenceOverride = true;
-    gridFallbackReason = "";
-    scheduleRender("検出した格子で作り直しました。");
-  });
-
-  pixelSize.addEventListener("input", () => { if (outputDots > 0) setOutputDots(0); });
-  document.querySelectorAll("[data-game-hardware]").forEach((button) => {
-    button.addEventListener("click", () => setGameHardware(button.dataset.gameHardware));
-  });
-  document.querySelectorAll("[data-dither]").forEach((button) => {
+    document.querySelectorAll("[data-dither]").forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.dither === dither));
     });
     document.querySelectorAll("[data-flat-fill]").forEach((button) => {
@@ -3686,6 +3676,8 @@
       batchCanvas.width = snapped ? sourceWidth : Math.max(1, Math.round(width * appliedBlock));
       batchCanvas.height = snapped ? sourceHeight : Math.max(1, Math.round(height * appliedBlock));
     }
+    /* 単体保存と挙動を揃える。ここを飛ばすとZIPだけ背景が残る */
+    if (backgroundCut === "auto") removeFlatBackground(batchSmallContext, width, height);
     const targetContext = batchCanvas.getContext("2d", { alpha: true });
     targetContext.clearRect(0, 0, batchCanvas.width, batchCanvas.height);
     targetContext.imageSmoothingEnabled = false;
@@ -3699,6 +3691,7 @@
       colorCount: Number(colorCount.value),
       dither,
       gridSnap,
+      backgroundCut,
       accentKeep,
       skinToneKeep,
       flatFill,
@@ -4046,6 +4039,22 @@
   });
   document.querySelectorAll("[data-grid-snap]").forEach((button) => {
     button.addEventListener("click", () => setGridSnap(button.dataset.gridSnap));
+  });
+  /* 状態同期の関数(updateControlState)の中に紛れ込んでいた配線をここへ戻した。
+     あちらは描画のたびに走るので、置いたままだとリスナーが増え続ける。 */
+  document.querySelectorAll("[data-output-dots]").forEach((button) => {
+    button.addEventListener("click", () => setOutputDots(button.dataset.outputDots));
+  });
+  document.querySelectorAll("[data-game-hardware]").forEach((button) => {
+    button.addEventListener("click", () => setGameHardware(button.dataset.gameHardware));
+  });
+  pixelSize.addEventListener("input", () => { if (outputDots > 0) setOutputDots(0); });
+  gridSuggestButton?.addEventListener("click", () => {
+    /* 門を今回だけ無効にして、格子を揃える処理をそのまま通す。
+       スライダーだけ合わせても格子には吸着しないので、結果が別物になる。 */
+    gridConfidenceOverride = true;
+    gridFallbackReason = "";
+    scheduleRender("検出した格子で作り直しました。");
   });
   document.querySelectorAll("[data-bg-remove]").forEach((button) => {
     button.addEventListener("click", () => {
