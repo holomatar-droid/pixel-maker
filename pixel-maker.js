@@ -67,7 +67,7 @@
   const styleSettings = {
     // AI補正は64色、手打ちドット風は16色で、検出した論理グリッドへ組み直す。
     // 通常変換と写真は既存の色づくりを保ち、補正モードの変更を波及させない。
-    refine: { pixel: 8, colors: 64, dither: "off", gridSnap: "auto", gridStabilize: true, accentKeep: false, flatFill: "off", saturation: 0, contrast: 0, edge: 0, outline: "off" },
+    refine: { pixel: 8, colors: 64, dither: "off", gridSnap: "auto", gridStabilize: true, accentKeep: false, flatFill: "soft", saturation: 0, contrast: 0, edge: 0, outline: "off" },
     craft: { pixel: 8, colors: 16, dither: "off", gridSnap: "auto", gridStabilize: true, accentKeep: true, flatFill: "soft", saturation: 0, contrast: 0, edge: 0, outline: "off" },
     auto: { pixel: 8, colors: 32, dither: "off", gridSnap: "auto", accentKeep: false, flatFill: "soft", saturation: 0, contrast: 0, edge: 0, outline: "off" },
     photo: { pixel: 4, colors: 128, dither: "off", gridSnap: "off", accentKeep: true, flatFill: "off", saturation: 0, contrast: 0, edge: 0, outline: "off" },
@@ -1104,9 +1104,14 @@
       values[index * 3 + 1] = data[offset + 1];
       values[index * 3 + 2] = data[offset + 2];
     }
+    /* 解析用の量子化は「格子を見つける」ためのもので、出力の色数とは別の話。
+       連動させると、4色を選んだだけで格子検出の結果まで変わってしまう
+       （実測: 2色の絵で 4色指定だと 59×33、8色指定だと 60×34 になった）。
+       輪郭を拾うのに必要な下限を確保する。 */
+    const requestedColors = Number(colorCount.value);
     const analysisColorCount = usesStructuredGrid()
-      ? Math.min(64, Number(colorCount.value))
-      : Math.min(16, Number(colorCount.value));
+      ? Math.min(64, Math.max(16, requestedColors))
+      : Math.min(16, Math.max(8, requestedColors));
     const palette = usesStructuredGrid()
       ? centroidPalette(values, alpha, analysisColorCount)
       : adaptivePalette(values, alpha, analysisColorCount, false);
