@@ -162,6 +162,9 @@
   const eraseEditButton = document.getElementById("eraseEditButton");
   const panEditButton = document.getElementById("panEditButton");
   const undoEditButton = document.getElementById("undoEditButton");
+  const redoEditButton = document.getElementById("redoEditButton");
+  const fillEraseEditButton = document.getElementById("fillEraseEditButton");
+  const colorEraseEditButton = document.getElementById("colorEraseEditButton");
   const editZoomOutButton = document.getElementById("editZoomOutButton");
   const editFitButton = document.getElementById("editFitButton");
   const editZoomInButton = document.getElementById("editZoomInButton");
@@ -249,6 +252,7 @@
     tool: "paint",
     color: "#0146ea",
     undo: [],
+    redo: [],
     undoFloorDirty: false,
     stroke: null,
     lastCell: null,
@@ -2416,17 +2420,23 @@
   }
 
   function setEditorTool(tool) {
-    if (!['paint', 'fill', 'erase', 'pan'].includes(tool)) return;
+    if (!['paint', 'fill', 'fillErase', 'colorErase', 'erase', 'pan'].includes(tool)) return;
     editor.tool = tool;
     if (editCanvas) editCanvas.dataset.tool = tool;
     if (editCursor) editCursor.hidden = tool === "pan";
     if (paintEditButton) paintEditButton.setAttribute("aria-pressed", String(tool === "paint"));
     if (fillEditButton) fillEditButton.setAttribute("aria-pressed", String(tool === "fill"));
+    if (fillEraseEditButton) fillEraseEditButton.setAttribute("aria-pressed", String(tool === "fillErase"));
+    if (colorEraseEditButton) colorEraseEditButton.setAttribute("aria-pressed", String(tool === "colorErase"));
     if (eraseEditButton) eraseEditButton.setAttribute("aria-pressed", String(tool === "erase"));
     if (panEditButton) panEditButton.setAttribute("aria-pressed", String(tool === "pan"));
     if (editorHelp) {
       editorHelp.textContent = tool === "fill"
         ? "タップした場所と同じ色の、つながった面をまとめて塗ります。"
+        : tool === "fillErase"
+        ? "タップした場所と同じ色の、つながった面をまとめて透明にします。"
+        : tool === "colorErase"
+        ? "タップした色を、画像全体から透明にします。取り残しの掃除に使えます。"
         : tool === "erase"
         ? "タップまたはなぞったドットを透明にします。"
         : tool === "pan"
@@ -2502,7 +2512,7 @@
     const data = image.data;
     const start = (cell.y * editCanvas.width + cell.x) * 4;
     const target = [data[start], data[start + 1], data[start + 2], data[start + 3]];
-    const fill = [...hexToRgb(editor.color), 255];
+    const fill = editor.tool === "fillErase" ? [0, 0, 0, 0] : [...hexToRgb(editor.color), 255];
     if (target.every((value, index) => value === fill[index])) return false;
     const matches = (offset) => target.every((value, index) => data[offset + index] === value);
     const stack = [cell.x, cell.y];
@@ -2518,6 +2528,30 @@
       stack.push(x - 1, y, x + 1, y, x, y - 1, x, y + 1);
     }
     editContext.putImageData(image, 0, 0);
+    return true;
+  }
+
+  /* タップした色を画像全体から消す。にじみの取り残しなど、
+     同じ色が離れた場所に散っている時に1つずつ消すのは現実的でない。 */
+  function eraseEditorColor(cell) {
+    if (!cell || !editContext || !editor.stroke) return false;
+    const image = editContext.getImageData(0, 0, editCanvas.width, editCanvas.height);
+    const data = image.data;
+    const start = (cell.y * editCanvas.width + cell.x) * 4;
+    if (data[start + 3] < 8) return false;
+    const target = [data[start], data[start + 1], data[start + 2], data[start + 3]];
+    let removed = 0;
+    for (let index = 0; index < editCanvas.width * editCanvas.height; index += 1) {
+      const offset = index * 4;
+      if (data[offset] !== target[0] || data[offset + 1] !== target[1]
+        || data[offset + 2] !== target[2] || data[offset + 3] !== target[3]) continue;
+      if (!editor.stroke.has(index)) editor.stroke.set(index, target.slice());
+      data[offset] = 0; data[offset + 1] = 0; data[offset + 2] = 0; data[offset + 3] = 0;
+      removed += 1;
+    }
+    if (!removed) return false;
+    editContext.putImageData(image, 0, 0);
+    setEditorStatus(`${removed}ドットを消しました。`);
     return true;
   }
 
@@ -2540,33 +2574,58 @@
         editor.undoFloorDirty = true;
       }
       editor.dirty = true;
+      editor.redo.length = 0;
     }
     editor.stroke = null;
     editor.lastCell = null;
+    syncEditorHistoryButtons();
+  }
+
+  function syncEditorHistoryButtons() {
     if (undoEditButton) undoEditButton.disabled = editor.undo.length === 0;
+    if (redoEditButton) redoEditButton.disabled = editor.redo.length === 0;
+  }
+
+  /* 履歴の1手を適用し、適用前の色を返す。これをもう一方の山に積めば
+     戻す・やり直すが同じ処理で書ける。 */
+  function applyEditorHistory(stroke) {
+    const image = editContext.getImageData(0, 0, editCanvas.width, editCanvas.height);
+    const data = image.data;
+    const inverse = [];
+    stroke.changes.forEach(([index, color]) => {
+      const offset = index * 4;
+      inverse.push([index, [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]]);
+      data[offset] = color[0];
+      data[offset + 1] = color[1];
+      data[offset + 2] = color[2];
+      data[offset + 3] = color[3];
+    });
+    editContext.putImageData(image, 0, 0);
+    return { width: stroke.width, height: stroke.height, changes: inverse };
+  }
+
+  function stepEditorHistory(from, to, message) {
+    if (!editContext || !from.length) return;
+    const stroke = from.pop();
+    if (stroke.width !== editCanvas.width || stroke.height !== editCanvas.height) {
+      editor.undo.length = 0;
+      editor.redo.length = 0;
+      editor.dirty = false;
+      syncEditorHistoryButtons();
+      return;
+    }
+    to.push(applyEditorHistory(stroke));
+    editor.dirty = editor.undoFloorDirty || editor.undo.length > 0;
+    syncEditorHistoryButtons();
+    setEditorStatus(message);
   }
 
   function undoEditorStroke() {
-    if (!editContext || !editor.undo.length) return;
-    const stroke = editor.undo.pop();
-    if (stroke.width !== editCanvas.width || stroke.height !== editCanvas.height) {
-      editor.undo.length = 0;
-      editor.dirty = false;
-      if (undoEditButton) undoEditButton.disabled = true;
-      return;
-    }
-    const image = editContext.getImageData(0, 0, editCanvas.width, editCanvas.height);
-    stroke.changes.forEach(([index, color]) => {
-      const offset = index * 4;
-      image.data[offset] = color[0];
-      image.data[offset + 1] = color[1];
-      image.data[offset + 2] = color[2];
-      image.data[offset + 3] = color[3];
-    });
-    editContext.putImageData(image, 0, 0);
-    editor.dirty = editor.undoFloorDirty || editor.undo.length > 0;
-    if (undoEditButton) undoEditButton.disabled = editor.undo.length === 0;
-    setEditorStatus("1つ前の状態に戻しました。");
+    stepEditorHistory(editor.undo, editor.redo, "1つ前の状態に戻しました。");
+  }
+
+  function redoEditorStroke() {
+    stepEditorHistory(editor.redo, editor.undo, "1つ先の状態に進めました。");
   }
 
   function redrawOutputFromSmall() {
@@ -2642,7 +2701,9 @@
     editContext.clearRect(0, 0, editCanvas.width, editCanvas.height);
     editContext.imageSmoothingEnabled = false;
     editContext.drawImage(smallCanvas, 0, 0);
+    editor.redo.length = 0;
     if (undoEditButton) undoEditButton.disabled = true;
+    if (redoEditButton) redoEditButton.disabled = true;
     setEditorDiscardOpen(false);
     setEditorStatus("");
     updateEditorPalette();
@@ -2759,7 +2820,15 @@
       return;
     }
     beginEditorStroke();
-    if (editor.tool === "fill") {
+    if (editor.tool === "colorErase") {
+      eraseEditorColor(cell);
+      endEditorStroke();
+      editor.pointerId = null;
+      try { editCanvas.releasePointerCapture(event.pointerId); } catch (_) { /* Pointer capture is optional. */ }
+      event.preventDefault();
+      return;
+    }
+    if (editor.tool === "fill" || editor.tool === "fillErase") {
       floodFillEditor(cell);
       endEditorStroke();
       editor.pointerId = null;
@@ -2813,7 +2882,8 @@
     if ((event.key === "Enter" || event.key === " ") && editor.tool !== "pan") {
       event.preventDefault();
       beginEditorStroke();
-      if (editor.tool === "fill") floodFillEditor({ x: editor.cursorX, y: editor.cursorY });
+      if (editor.tool === "colorErase") eraseEditorColor({ x: editor.cursorX, y: editor.cursorY });
+      else if (editor.tool === "fill" || editor.tool === "fillErase") floodFillEditor({ x: editor.cursorX, y: editor.cursorY });
       else continueEditorStroke({ x: editor.cursorX, y: editor.cursorY });
       endEditorStroke();
       return;
@@ -3904,6 +3974,9 @@
   eraseEditButton?.addEventListener("click", () => setEditorTool("erase"));
   panEditButton?.addEventListener("click", () => setEditorTool("pan"));
   undoEditButton?.addEventListener("click", undoEditorStroke);
+  redoEditButton?.addEventListener("click", redoEditorStroke);
+  fillEraseEditButton?.addEventListener("click", () => setEditorTool("fillErase"));
+  colorEraseEditButton?.addEventListener("click", () => setEditorTool("colorErase"));
   editColorInput?.addEventListener("input", () => {
     editor.color = editColorInput.value.toLowerCase();
     setEditorTool("paint");

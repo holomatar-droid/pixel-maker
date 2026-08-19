@@ -9,7 +9,7 @@
   <link rel="icon" type="image/svg+xml" href="./favicon.svg">
   <link rel="stylesheet" href="./pixel-maker.css?v=20260818-3">
   <script src="./vendor/fflate.js?v=0.8.2" defer></script>
-  <script src="./pixel-maker.js?v=20260819-10" defer></script>
+  <script src="./pixel-maker.js?v=20260819-11" defer></script>
 </head>
 <body>
   <header class="tool-header">
@@ -110,8 +110,11 @@
                 <button id="paintEditButton" type="button" aria-pressed="true">塗る</button>
                 <button id="fillEditButton" type="button" aria-pressed="false">面を塗る</button>
                 <button id="eraseEditButton" type="button" aria-pressed="false">消す</button>
+                <button id="fillEraseEditButton" type="button" aria-pressed="false">面を消す</button>
+                <button id="colorEraseEditButton" type="button" aria-pressed="false">この色を消す</button>
                 <button id="panEditButton" type="button" aria-pressed="false">移動</button>
                 <button id="undoEditButton" type="button" disabled>1つ戻す</button>
+                <button id="redoEditButton" type="button" disabled>やり直す</button>
               </div>
               <p class="editor-help" id="editorHelp">タップまたはなぞって塗れます。</p>
               <p class="editor-status" id="editorStatus" role="status" aria-live="polite"></p>
