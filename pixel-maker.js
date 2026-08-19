@@ -2631,6 +2631,21 @@
       stack.push(x - 1, y, x + 1, y, x, y - 1, x, y + 1);
     }
     editContext.putImageData(image, 0, 0);
+    /* 被写体が背景を分断していると、片側だけ消えて反対側が残る。地続きだけを
+       消すのは仕様どおりだが、黙って終わると「消えなかった」ように見える。
+       同じ色が離れた場所に残っているなら、全部消す手段があることを伝える。 */
+    if (editor.tool === "fillErase") {
+      let remaining = 0;
+      for (let index = 0; index < editCanvas.width * editCanvas.height; index += 1) {
+        const offset = index * 4;
+        if (data[offset + 3] < 8) continue;
+        if (data[offset] === target[0] && data[offset + 1] === target[1]
+          && data[offset + 2] === target[2] && data[offset + 3] === target[3]) remaining += 1;
+      }
+      setEditorStatus(remaining
+        ? `つながった面を消しました。同じ色が${remaining}ドット離れた場所に残っています。全部消すなら「この色を消す」を使ってください。`
+        : "つながった面を消しました。");
+    }
     return true;
   }
 
