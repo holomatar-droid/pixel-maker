@@ -38,9 +38,26 @@
     return mode === "strong" ? 0.066 : 0.036;
   }
 
+  /* 近い色をまとめるのは、階調やアンチエイリアスの端数を掃除するため。
+     ところが「広い面どうしがたまたま近い」場合まで巻き込んでしまう。
+     実測（イラスト）: 背景 10748px と肌 4225px は距離 0.025 しか離れておらず、
+     しきい値 0.036 の内側なので1色に潰れ、顔が背景と同じ色になった。
+     どちらも画面のこれだけを占めるなら、それは端数ではなく別の面なので残す。 */
+  const MERGE_KEEP_SHARE = 0.05;
+
+  function shareGuard(weights) {
+    if (!Array.isArray(weights)) return null;
+    let total = 0;
+    for (const weight of weights) total += Math.max(0, weight || 0);
+    if (!total) return null;
+    return (left, right) =>
+      left / total >= MERGE_KEEP_SHARE && right / total >= MERGE_KEEP_SHARE;
+  }
+
   function mergeSimilarPaletteColors(palette, weights, mode = "soft") {
     const threshold = thresholdFor(mode);
     if (threshold === 0 || palette.length < 2) return palette;
+    const bothLarge = shareGuard(weights);
     const clusters = [];
     palette
       .map((color, index) => ({
@@ -59,7 +76,8 @@
             nearest = cluster;
           }
         }
-        if (!nearest || nearestDistance > threshold) {
+        if (!nearest || nearestDistance > threshold
+          || (bothLarge && bothLarge(nearest.weight, weight))) {
           clusters.push({ weight, sum: color.map((value) => value * weight), lab });
           return;
         }
@@ -83,6 +101,7 @@
       counts.set(key, (counts.get(key) || 0) + 1);
     }
     if (counts.size < 2) return;
+    const bothLarge = shareGuard([...counts.values()]);
     const entries = [...counts.entries()]
       .map(([key, count]) => ({
         key,
@@ -104,8 +123,12 @@
           nearest = target;
         }
       }
-      if (nearest && nearestDistance <= threshold) remap.set(entry.key, nearest.rgb);
-      else kept.push(entry);
+      if (nearest && nearestDistance <= threshold
+        && !(bothLarge && bothLarge(nearest.count, entry.count))) {
+        remap.set(entry.key, nearest.rgb);
+      } else {
+        kept.push(entry);
+      }
     }
     if (!remap.size) return;
     for (let index = 0; index < width * height; index += 1) {
