@@ -3150,9 +3150,19 @@
     smallCanvas.width = width;
     smallCanvas.height = height;
     smallContext.clearRect(0, 0, width, height);
-    const photoSampling = activeStyle === "photo";
-    smallContext.imageSmoothingEnabled = photoSampling;
-    if (photoSampling) smallContext.imageSmoothingQuality = "high";
+    /* 縮小するのに補間を切ると、1ドットにつき元画像の1画素しか見ない。
+       イラストの細い輪郭線がその1点に当たると、周りが明るくてもドット全体が
+       最暗色になり、面の境目に黒い柱が立つ。
+       実測（1254pxのイラストを157ドットへ）: 元のセル平均が 215,192,167 の
+       位置にパレット最暗色 75,27,11 が入り、全体の2.6%が元より40以上暗かった。
+       面で平均すればセルの代表色になる。
+       格子スナップ後はセル多数決で色を決めており、そちらのほうが細線に強いので
+       手を入れない。等倍で描くときは縮小が起きず、この判定は自動的に外れる。 */
+    const shrinkingSource = !snapped
+      && (sourceImage.naturalWidth > width || sourceImage.naturalHeight > height);
+    const smoothSampling = activeStyle === "photo" || shrinkingSource;
+    smallContext.imageSmoothingEnabled = smoothSampling;
+    if (smoothSampling) smallContext.imageSmoothingQuality = "high";
     if (snapped) smallContext.drawImage(snapped.canvas, 0, 0, width, height);
     else smallContext.drawImage(sourceImage, 0, 0, width, height);
 
@@ -3715,9 +3725,12 @@
     batchSmallCanvas.width = width;
     batchSmallCanvas.height = height;
     batchSmallContext.clearRect(0, 0, width, height);
-    const photoSampling = activeStyle === "photo";
-    batchSmallContext.imageSmoothingEnabled = photoSampling;
-    if (photoSampling) batchSmallContext.imageSmoothingQuality = "high";
+    // 一括変換も単体と同じ規則にする（上の render 内のコメント参照）
+    const shrinkingSource = !snapped
+      && (source.naturalWidth > width || source.naturalHeight > height);
+    const smoothSampling = activeStyle === "photo" || shrinkingSource;
+    batchSmallContext.imageSmoothingEnabled = smoothSampling;
+    if (smoothSampling) batchSmallContext.imageSmoothingQuality = "high";
     if (snapped) batchSmallContext.drawImage(snapped.canvas, 0, 0, width, height);
     else batchSmallContext.drawImage(source, 0, 0, width, height);
 
