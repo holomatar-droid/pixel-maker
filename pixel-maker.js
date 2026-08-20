@@ -816,9 +816,6 @@
     };
   }
 
-  /* 近い色をまとめる。代表色は「その色を実際に使っている画素数」で重み付けした平均にする。
-     単純平均にすると、にじみで生まれた少数の中間色が主要色と同じ重みを持ってしまい、
-     肌色のような広い面が灰色側へ引っ張られる（彩度が半分近く落ちる）。 */
   /* にじみ色の抑制。
 
      白い背景と黒いフチの間には、AIのぼかしが作った中間色が残る。これは
@@ -840,62 +837,8 @@
      102×100ドットでも600ms近くかかっていた。端点は上位色だけに絞る。 */
   const BLEND_MAX_ENDPOINTS = 12;
 
-  /* セル多数決で決めた色を、知覚的にほぼ同じもの同士でまとめる。
-
-     格子経路（AI補正・手打ち風）は processPixels を通らないため、
-     パレット統合が一度も走っていなかった。実測では、ベタ塗りのはずの面に
-     OkLab距離 0.009 の2色が並存していた（統合の閾値は 0.036〜0.066 なので、
-     本来なら1色になるべき差）。「ベタ塗りのむらをなくす」を切り替えても
-     結果が変わらなかったのはこのため。
-
-     面積の大きい色を代表に選び、そこへ寄せる。少数派を残すと、
-     広いベタ面が少数派の色に塗り替わってしまう。 */
   function mergeSnappedCellColors(data, width, height) {
-    if (flatFill === "off") return;
-    const threshold = flatFill === "strong" ? 0.066 : 0.036;
-    const counts = new Map();
-    for (let index = 0; index < width * height; index += 1) {
-      const offset = index * 4;
-      if (data[offset + 3] < 8) continue;
-      const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
-      counts.set(key, (counts.get(key) || 0) + 1);
-    }
-    if (counts.size < 2) return;
-    const entries = [...counts.entries()]
-      .map(([key, count]) => ({
-        key,
-        count,
-        rgb: [(key >> 16) & 255, (key >> 8) & 255, key & 255]
-      }))
-      .sort((left, right) => right.count - left.count);
-    for (const entry of entries) entry.lab = rgbToOklab(entry.rgb);
-
-    const remap = new Map();
-    const kept = [];
-    for (const entry of entries) {
-      let nearest = null;
-      let nearestDistance = Infinity;
-      for (const target of kept) {
-        const dl = (entry.lab[0] - target.lab[0]) * 1.2;
-        const da = entry.lab[1] - target.lab[1];
-        const db = entry.lab[2] - target.lab[2];
-        const distance = Math.sqrt(dl * dl + da * da + db * db);
-        if (distance < nearestDistance) { nearestDistance = distance; nearest = target; }
-      }
-      if (nearest && nearestDistance <= threshold) remap.set(entry.key, nearest.rgb);
-      else kept.push(entry);
-    }
-    if (!remap.size) return;
-    for (let index = 0; index < width * height; index += 1) {
-      const offset = index * 4;
-      if (data[offset + 3] < 8) continue;
-      const key = (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
-      const replacement = remap.get(key);
-      if (!replacement) continue;
-      data[offset] = replacement[0];
-      data[offset + 1] = replacement[1];
-      data[offset + 2] = replacement[2];
-    }
+    window.HolometerPaletteEngine.mergeSnappedCellColors(data, width, height, flatFill);
   }
 
   function suppressBlendColors(data, width, height) {
@@ -1061,35 +1004,7 @@
 
 
   function mergeSimilarPaletteColors(palette, weights) {
-    if (flatFill === "off" || palette.length < 2) return palette;
-    const threshold = flatFill === "strong" ? 0.066 : 0.036;
-    const clusters = [];
-    const ordered = palette
-      .map((color, index) => ({ color, weight: Math.max(1, weights ? weights[index] || 0 : 1) }))
-      .sort((left, right) => rgbToOklab(left.color)[0] - rgbToOklab(right.color)[0]);
-    for (const { color, weight } of ordered) {
-      const lab = rgbToOklab(color);
-      let nearest = null;
-      let nearestDistance = Infinity;
-      for (const cluster of clusters) {
-        const dl = (lab[0] - cluster.lab[0]) * 1.2;
-        const da = lab[1] - cluster.lab[1];
-        const db = lab[2] - cluster.lab[2];
-        const distance = Math.sqrt(dl * dl + da * da + db * db);
-        if (distance < nearestDistance) {
-          nearestDistance = distance;
-          nearest = cluster;
-        }
-      }
-      if (!nearest || nearestDistance > threshold) {
-        clusters.push({ weight, sum: color.map((value) => value * weight), lab });
-        continue;
-      }
-      nearest.weight += weight;
-      for (let channel = 0; channel < 3; channel += 1) nearest.sum[channel] += color[channel] * weight;
-      nearest.lab = rgbToOklab(nearest.sum.map((value) => value / nearest.weight));
-    }
-    return clusters.map((cluster) => cluster.sum.map((value) => value / cluster.weight));
+    return window.HolometerPaletteEngine.mergeSimilarPaletteColors(palette, weights, flatFill);
   }
 
   // Grid-first cleanup, independently implemented from the workflow described by
@@ -1374,6 +1289,25 @@
   const GRID_MIN_CUTS = 5;
   const GRID_MIN_PERIODICITY = 0.25;  // これ未満は格子ではなく写真等とみなす
   const GRID_MIN_REFINE_PERIODICITY = 0.42;  // AI補正は曖昧な格子を多数決で壊さない
+  /* そもそも格子があるかどうかを見る。確信度(periodicity)は繰り返しの強さしか
+     測らないので、主線のはっきりしたイラストでも 0.42 前後まで出てしまい、
+     本物のドット絵（refineで 0.30〜0.85）と重なって区別できなかった。
+     位相の揃い方なら、イラスト 0.049 に対し本物は 0.149〜0.303 で重ならない。
+     セルの境目が一定の格子に乗っているかを見るため、格子が無い絵では上がらない。
+     小画像保護の GRID_MIN_PHASE_ALIGNMENT とは目的も閾値も別物。 */
+  const GRID_MIN_PHASE_TO_SNAP = 0.10;
+  /* 位相だけでは、ノイズの多い本物のドット絵（実測 0.073）とイラスト（0.049）が
+     近すぎて閾値を置けない。等倍拡大されたドット絵は解析画像の縦横がピッチで
+     ちょうど割り切れる（1024÷64=16）が、誤検出の格子は端数が残る（÷44.5=28.8）。
+     解析画像は縮小されている場合があるので完全な証明にはならないが、
+     位相が低い時の二段目の関門としては十分機能した（下の格子なし判定で併用）。 */
+  const GRID_DIVISION_TOLERANCE = 0.15;  // 割り切れ具合の許容（セル数の小数部）
+  function gridStepDividesEvenly(length, step) {
+    if (!(length > 0) || !(step > 0)) return false;
+    const count = length / step;
+    if (count < 2) return false;
+    return Math.abs(count - Math.round(count)) <= GRID_DIVISION_TOLERANCE;
+  }
   const GRID_SMALL_SOURCE_EDGE = 512;  // 小さい完成絵は誤検出時の情報損失が大きいため保護する
   const GRID_MIN_PHASE_ALIGNMENT = 0.62;  // 真の拡大格子はエッジが同じ位相へ集中する
   const GRID_OPAQUE_ALPHA = 128;  // これ未満の画素は縁のにじみとみなし、色を決める投票から外す
@@ -1620,6 +1554,28 @@
       profiles,
       detectedStep
     );
+    /* 格子が存在しない絵（イラスト等）を、粗い格子へ潰さない。
+       実測: イラストを既定のまま通すと1254pxが41ドットになり、出力サイズを
+       指定しても内容は戻らなかった（先に潰してから拡大するため）。 */
+    const phaseAlignment = Math.min(
+      gridPhaseAlignment(profiles.columns, detectedStep),
+      gridPhaseAlignment(profiles.rows, detectedStep)
+    );
+    /* gridPhaseAlignment は step が 4px 未満だと常に 0 を返すため、細かい格子を
+       無条件に落としてしまう（実測: 真値418・ピッチ3.0pxの画像が157になった）。
+       位相が意味を持つ範囲でだけ判定する。 */
+    const stepDividesSource = gridStepDividesEvenly(analysis.width, detectedStep)
+      && gridStepDividesEvenly(analysis.height, detectedStep);
+    if (
+      detectedStep >= 4
+      && phaseAlignment < GRID_MIN_PHASE_TO_SNAP
+      && !stepDividesSource
+      && !gridConfidenceOverride
+    ) {
+      uncertainGridBlock = 0;
+      if (activeStyle === "refine") gridFallbackReason = "格子が見当たらないため、ドットの大きさで刻む通常の変換をしています。";
+      return null;
+    }
     if (periodicity < minimumPeriodicity && activeStyle !== "craft" && !gridConfidenceOverride) {
       if (preserveSmallSource) {
         uncertainGridBlock = 0;
